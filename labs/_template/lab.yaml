@@ -1,0 +1,41 @@
+id: L000
+name: template
+version: 1               # 잠금 구간을 본 뒤 전략을 고치면 +1 하고 다시 검증
+status: draft            # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
+category: classic        # classic | intraday | algo | arbitrage | llm
+
+llm:                     # category: llm 일 때만
+  model: ""              # 모델 ID (바꾸면 version +1)
+  knowledge_cutoff: ""   # 이 날짜 이후 데이터로만 백테스트 가능
+  prompt_version: 1
+  consistency_runs: 5    # 같은 입력 반복 판단 횟수
+  baselines: [buy_and_hold, momentum, random]
+  forward_start: ""      # 앞으로 검증 시작일 (최소 60거래일)
+market: kr_stock         # kr_stock | us_stock | crypto_spot | crypto_futures | cross_market
+universe: ""             # 예: KOSPI200, S&P500, BTCUSDT
+timeframe: 1d            # 1m | 5m | 1h | 1d ...
+
+data_snapshot: ""        # 사용한 데이터 스냅샷 ID (재현용)
+
+walk_forward:
+  start: ""              # 개발 구간 시작일
+  train: 24M             # 학습 창 길이
+  test: 6M               # 시험 창 길이 (이만큼씩 앞으로 이동)
+
+lockbox:                 # 판정 시 자동 기록 (실행일 기준 최근 6개월)
+  start: ""
+  end: ""
+  opened: false          # 한 번 열면 true. 이후 전략을 바꾸면 version +1
+
+costs:                   # 비워 두면 config/settings.yaml 기본값 사용
+  fee_pct:
+  slippage_pct:
+
+params: {}               # 전략 파라미터
+
+benchmark: ""            # 예: KOSPI, SPY, BTC 보유
+
+retirement:              # 전략별 퇴출 조건 (live 단계에서 감시)
+  max_drawdown_pct:      # 예: 개발 구간 MDD × 1.5
+  max_losing_days:       # 예: 연속 손실 일수
+  custom: ""             # 그 밖의 조건 (예: 펀딩비가 N일 연속 음수)

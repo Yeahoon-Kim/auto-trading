@@ -1,0 +1,39 @@
+# 일반 설정 (비밀 값은 .env 에만)
+
+markets:
+  kr_stock:
+    broker: kis
+    timezone: Asia/Seoul
+    session: "09:00-15:30"
+    fee_pct: 0.015        # 위탁수수료 (계좌 조건에 맞게 수정)
+    tax_pct_sell: 0.18    # 매도 시 증권거래세+농특세 (연도별 변동 확인 필요)
+  us_stock:
+    broker: kis
+    timezone: America/New_York
+    session: "09:30-16:00"
+    fee_pct: 0.25         # KIS 해외주식 수수료 (계좌 조건에 맞게 수정)
+  crypto_spot:
+    broker: binance
+    timezone: UTC
+    session: "24/7"
+    fee_pct: 0.1          # 현물 기본 taker 수수료 (BNB 할인 시 조정)
+  crypto_futures:
+    broker: binance
+    timezone: UTC
+    session: "24/7"
+    fee_pct: 0.05         # USDT-M 선물 taker 수수료
+  crypto_kr:
+    broker: upbit         # 김치 프리미엄 비교용
+    timezone: Asia/Seoul
+    session: "24/7"
+    fee_pct: 0.05
+
+backtest:
+  initial_capital_krw: 10000000
+  slippage_pct: 0.05
+  # 생존편향 방지: 상장폐지 종목 포함 데이터 사용
+  include_delisted: true
+  # 기간은 lab별로 lab.yaml에서 지정
+
+data:
+  store: data/processed   # parquet + duckdb

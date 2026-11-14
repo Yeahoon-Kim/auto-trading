@@ -1,0 +1,21 @@
+# 데이터 수집 설정
+
+binance:
+  top_n: 30                    # 거래대금 상위 USDT 페어 수
+  start_1m: "2022-01-01"       # 분봉 백필 시작 (현물·선물)
+  start_funding: "2020-01-01"
+  exclude_bases: [USDC, FDUSD, TUSD, USDP, DAI, EUR, BUSD, USD1, PYUSD, XUSD, RLUSD, USDE, BFUSD, AEUR, EURI, PAXG, XAUT, WBTC]
+
+upbit:
+  start_1m: "2024-01-01"       # Binance 유니버스와 겹치는 KRW 페어
+
+kr:
+  start_1d: "2010-01-01"       # 전 종목(상장폐지 포함) 일봉
+  minute_universe: [KOSPI200, KOSDAQ150]
+  # 분봉은 KIS가 제공하는 만큼(약 1년) 과거로 백필
+  requests_per_sec: 15         # KIS 실전 한도 20/s 보다 여유 있게
+
+us:
+  start_1d: "2010-01-01"
+  universe: [SP500, NASDAQ100]
+  # 1분봉은 yfinance 제공 범위(최근 30일)만 백필 → 이후 매일 누적

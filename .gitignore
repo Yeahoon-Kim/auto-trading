@@ -1,0 +1,38 @@
+# 비밀 정보 — 절대 커밋 금지
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config/secrets*.yaml
+kis_token*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+
+# 데이터·결과·로그 (용량 크고 재생성 가능)
+data/raw/*
+data/processed/*
+results/**/*
+logs/*
+!**/.gitkeep
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# lab 결과물 (재생성 가능)
+labs/*/results/*
+
+# 토큰 등 로컬 캐시
+.cache/
+
+# 수집 상태 (로컬 전용)
+data/state.sqlite*
