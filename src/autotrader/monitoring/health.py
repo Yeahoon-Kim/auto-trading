@@ -31,6 +31,9 @@ RULES = {
     "us_1d": {"bdays": 2, "tz": "America/New_York", "close_hour": 17},
     "us_1m": {"bdays": 2, "tz": "America/New_York", "close_hour": 17},
     "macro_1d": {"bdays": 3, "tz": "America/New_York", "close_hour": 17},
+    "krx_1d": {"bdays": 3, "tz": "Asia/Seoul", "close_hour": 16},  # KRX는 다음 영업일 공개
+    "dart_disclosures": {"bdays": 3, "tz": "Asia/Seoul", "close_hour": 20},
+    "ecos": {"bdays": 5, "tz": "Asia/Seoul", "close_hour": 16},
     "fred": {"bdays": 10, "tz": "America/New_York", "close_hour": 17},  # 주간 지표(NFCI 등)는 발표가 늦음
 }
 INACTIVE_HOURS = 30   # 데이터셋 전체가 이 시간 동안 한 번도 갱신 안 되면 수집기 미실행 의심

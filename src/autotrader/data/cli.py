@@ -27,7 +27,7 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("collect")
     c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
-                                      "us-minute", "macro"])
+                                      "us-minute", "macro", "legacy", "kr-public"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
     h = sub.add_parser("health")
@@ -49,7 +49,7 @@ def main() -> None:
             notify.send(text)
         return
 
-    from .collectors import binance, kr_stock, macro, upbit, us_stock
+    from .collectors import binance, kr_public, kr_stock, legacy_db, macro, upbit, us_stock
     from .collectors.common import keep_awake
     keep_awake()
     src = a.source
@@ -60,6 +60,10 @@ def main() -> None:
             upbit.run(a.symbols)
         elif src == "macro":
             macro.run(a.symbols)
+        elif src == "legacy":
+            legacy_db.run(a.symbols)
+        elif src == "kr-public":
+            kr_public.run(a.symbols)
         elif src.startswith("kr"):
             kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
         elif src.startswith("us"):

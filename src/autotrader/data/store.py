@@ -32,19 +32,21 @@ def _period_key(ts: pd.Series, dataset: str) -> pd.Series:
     return ts.dt.strftime("%Y")
 
 
-def write(dataset: str, symbol: str, df: pd.DataFrame) -> int:
-    """기존 파일과 병합해 저장 (ts 기준 중복 제거, 나중 값 우선). 저장한 행 수를 반환."""
+def write(dataset: str, symbol: str, df: pd.DataFrame, key: list[str] | None = None) -> int:
+    """기존 파일과 병합해 저장 (key 기준 중복 제거, 나중 값 우선). 저장한 행 수를 반환.
+    key 기본값은 ["ts"]. 여러 종목을 한 표에 담는 횡단면 데이터셋은 ["ts", "symbol"]처럼 지정한다."""
+    key = key or ["ts"]
     if df.empty:
         return 0
     df = df.copy()
     df["ts"] = pd.to_datetime(df["ts"], utc=True)
     folder = DATA_DIR / dataset / _safe(symbol)
     folder.mkdir(parents=True, exist_ok=True)
-    for key, part in df.groupby(_period_key(df["ts"], dataset)):
-        path = folder / f"{key}.parquet"
+    for period, part in df.groupby(_period_key(df["ts"], dataset)):
+        path = folder / f"{period}.parquet"
         if path.exists():
             part = pd.concat([pd.read_parquet(path), part], ignore_index=True)
-        part = part.drop_duplicates("ts", keep="last").sort_values("ts").reset_index(drop=True)
+        part = part.drop_duplicates(key, keep="last").sort_values(key).reset_index(drop=True)
         tmp = path.with_suffix(".tmp")
         part.to_parquet(tmp, compression="zstd", index=False)
         os.replace(tmp, path)

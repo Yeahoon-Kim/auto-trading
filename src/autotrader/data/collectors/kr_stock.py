@@ -72,6 +72,18 @@ def build_universe() -> tuple[pd.DataFrame, pd.DataFrame]:
     kosdaq = common[common["Market"].str.startswith("KOSDAQ")].nlargest(150, "Marcap")
     minute = pd.concat([kospi, kosdaq])[["Code", "Name", "Market", "Marcap"]]
     minute.columns = ["code", "name", "market", "marcap"]
+    # 실제 KOSPI200·KOSDAQ150 구성종목(기존 stock-analysis-site DB에서 가져온 목록)이 있으면 합친다
+    idx_file = store.DATA_DIR / "legacy" / "index_constituents.parquet"
+    if idx_file.exists():
+        idx = pd.read_parquet(idx_file)
+        real = idx[idx["index_code"].isin(["KOSPI200", "KOSDAQ150"])]
+        extra = real[~real["symbol"].isin(minute["code"])]
+        info = cur.set_index("Code")
+        minute = pd.concat([minute, pd.DataFrame({
+            "code": extra["symbol"], "name": extra["symbol"].map(info["Name"]),
+            "market": extra["symbol"].map(info["Market"]), "marcap": extra["symbol"].map(info["Marcap"]),
+        })], ignore_index=True)
+        minute["in_index"] = minute["code"].isin(real["symbol"])
     store.save_universe("kr_minute", minute)
     logger.info(f"KR 유니버스: 일봉 {len(daily)}개 (상장폐지 {daily['delisted'].notna().sum()}개), 분봉 {len(minute)}개")
     return daily, minute

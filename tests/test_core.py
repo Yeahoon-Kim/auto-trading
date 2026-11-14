@@ -31,6 +31,15 @@ def test_write_merges_and_dedupes(tmp_store):
     assert {p.stem for p in (store.DATA_DIR / "x_1m" / "AAA").glob("*.parquet")} == {"2026-01", "2026-02"}
 
 
+def test_cross_section_key_keeps_all_symbols(tmp_store):
+    a, b = _bars("2026-01-02", 2, freq="1D"), _bars("2026-01-02", 2, freq="1D", price=5)
+    a["symbol"], b["symbol"] = "AAA", "BBB"
+    store.write("x_1d", "ALL", pd.concat([a, b]), key=["ts", "symbol"])
+    store.write("x_1d", "ALL", a.assign(close=7.0), key=["ts", "symbol"])  # AAA만 갱신
+    df = store.read("x_1d", "ALL")
+    assert len(df) == 4 and set(df.loc[df.symbol == "AAA", "close"]) == {7.0}
+
+
 def test_state_keeps_min_first_and_max_last(tmp_store):
     store.write("x_1m", "AAA", _bars("2026-03-01", 2))
     store.write("x_1m", "AAA", _bars("2026-02-01", 2))
