@@ -1,9 +1,9 @@
-# 모든 수집기를 병렬로 실행 (서로 다른 서버라 동시에 돌려도 한도 충돌 없음).
+﻿# 모든 수집기를 병렬로 실행 (서로 다른 서버라 동시에 돌려도 한도 충돌 없음).
 # 백필과 매일 갱신 모두 이 스크립트 하나로 처리한다. 이미 받은 구간은 건너뛴다.
 #   사용: powershell -ExecutionPolicy Bypass -File scripts\collect_all.ps1
 #   일부만: ... -File scripts\collect_all.ps1 -Sources binance,kr
 
-param([string[]]$Sources = @("binance", "upbit", "kr", "us"))
+param([string[]]$Sources = @("binance", "upbit", "kr", "us", "macro"))
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root

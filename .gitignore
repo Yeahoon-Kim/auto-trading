@@ -36,3 +36,6 @@ labs/*/results/*
 
 # 수집 상태 (로컬 전용)
 data/state.sqlite*
+
+# 생성되는 보고서
+reports/

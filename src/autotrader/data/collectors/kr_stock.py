@@ -33,12 +33,16 @@ def kis() -> KISClient:
 
 def _get(path: str, tr_id: str, params: dict) -> dict:
     c = kis()
-    for i in range(5):
+    for i in range(6):
         _limit.wait()
         try:
             return c.get(path, tr_id, params)
-        except RuntimeError as e:  # 초당 한도 초과(EGW00201) 등은 잠시 쉬고 재시도
-            if "EGW00201" in str(e) or i < 2:
+        except RuntimeError as e:
+            # EGW00201: 초당 한도 초과, OPSQ1002: SESSION FULL(동시 세션 초과) → 길게 쉬고 재시도
+            if "EGW00201" in str(e) or "OPSQ1002" in str(e):
+                time.sleep(min(60, 5 * 2 ** i))
+                continue
+            if i < 2:
                 time.sleep(1 + i)
                 continue
             raise
@@ -188,17 +192,18 @@ def trading_days() -> list[str]:
     return sorted(df["ts"].dt.tz_convert(KST).dt.strftime("%Y%m%d").unique())
 
 
-def collect_minute(code: str, days: list[str]) -> None:
+def collect_minute(code: str, days: list[str], phase: str = "all") -> None:
+    """phase: latest(마지막 수집일 이후) / backfill(과거분) / all."""
     st = store.get_state("kr_1m", code)
     today = pd.Timestamp.now(tz=KST)
     # 장중이면 오늘은 제외 (장 마감 후 수집)
     closed = [d for d in days if d < today.strftime("%Y%m%d") or today.hour >= 16]
     try:
-        if st["last_ts"] is not None:  # 최신분
+        if phase in ("latest", "all") and st["last_ts"] is not None:  # 최신분
             last = st["last_ts"].tz_convert(KST).strftime("%Y%m%d")
             for d in [d for d in closed if d > last]:
                 store.write("kr_1m", code, _minute_day(code, d))
-        if not st["backfill_done"]:  # 과거분: 데이터가 5거래일 연속 비면 KIS 보관 한도로 보고 종료
+        if phase in ("backfill", "all") and not st["backfill_done"]:  # 과거분: 5거래일 연속 비면 KIS 보관 한도로 보고 종료
             first = st["first_ts"].tz_convert(KST).strftime("%Y%m%d") if st["first_ts"] is not None else "99999999"
             empty, buf = 0, []
             for d in reversed([d for d in closed if d < first]):
@@ -214,7 +219,7 @@ def collect_minute(code: str, days: list[str]) -> None:
             if buf:
                 store.write("kr_1m", code, pd.concat(buf))
             store.set_state("kr_1m", code, backfill_done=True)
-        logger.info(f"kr_1m {code} 완료")
+            logger.info(f"kr_1m {code} 백필 완료")
     except Exception as e:
         store.set_state("kr_1m", code, status="error", error=str(e)[:500])
         logger.error(f"kr_1m {code} 실패: {e}")
@@ -228,11 +233,22 @@ def run(what: str = "all", symbols: list[str] | None = None) -> None:
 
     daily, minute = universes()
     kis().token()  # 스레드 시작 전에 토큰 한 번만 발급
+    days = trading_days() if what in ("all", "minute") else []
+    codes = symbols or minute["code"].tolist()
+    d = daily[daily["code"].isin(symbols)] if symbols else daily
+    done_daily = d["code"].map(lambda c: store.get_state("kr_1d", c)["backfill_done"])
+    # 순서: 최신 데이터를 먼저 맞추고(분봉 → 일봉), 과거분은 그 뒤에 채운다.
+    # 분봉 백필을 일봉 백필보다 앞에 두는 이유: KIS 분봉은 약 1년만 보관해 매일 하루치씩 사라진다.
     with ThreadPoolExecutor(WORKERS) as pool:
         if what in ("all", "minute"):
-            days = trading_days()
-            codes = symbols or minute["code"].tolist()
-            list(pool.map(lambda c: collect_minute(c, days), codes))
+            list(pool.map(lambda c: collect_minute(c, days, "latest"), codes))
+            logger.info("kr_1m 최신분 완료")
         if what in ("all", "daily"):
-            d = daily[daily["code"].isin(symbols)] if symbols else daily
-            list(pool.map(lambda r: collect_daily(r[0], r[1]), zip(d["code"], d["delisted"])))
+            latest = d[done_daily]
+            list(pool.map(lambda r: collect_daily(r[0], r[1]), zip(latest["code"], latest["delisted"])))
+            logger.info(f"kr_1d 최신분 완료 ({len(latest)}종목)")
+        if what in ("all", "minute"):
+            list(pool.map(lambda c: collect_minute(c, days, "backfill"), codes))
+        if what in ("all", "daily"):
+            rest = d[~done_daily]
+            list(pool.map(lambda r: collect_daily(r[0], r[1]), zip(rest["code"], rest["delisted"])))

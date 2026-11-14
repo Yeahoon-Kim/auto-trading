@@ -26,9 +26,12 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="autotrader.data.cli")
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("collect")
-    c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily", "us-minute"])
+    c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
+                                      "us-minute", "macro"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
+    h = sub.add_parser("health")
+    h.add_argument("--notify", action="store_true", help="문제가 있으면 텔레그램으로 알림")
     a = p.parse_args()
 
     if a.cmd == "status":
@@ -36,18 +39,34 @@ def main() -> None:
         print(store.summary().to_string(index=False))
         return
 
-    from .collectors import binance, kr_stock, upbit, us_stock
+    from ..monitoring import health, notify
+
+    if a.cmd == "health":
+        issues = health.check()
+        text = health.report(issues) + "\n" + health.progress()
+        print(text)
+        if a.notify and issues:
+            notify.send(text)
+        return
+
+    from .collectors import binance, kr_stock, macro, upbit, us_stock
     from .collectors.common import keep_awake
     keep_awake()
     src = a.source
-    if src == "binance":
-        binance.run(a.symbols)
-    elif src == "upbit":
-        upbit.run(a.symbols)
-    elif src.startswith("kr"):
-        kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
-    elif src.startswith("us"):
-        us_stock.run({"us": "all", "us-daily": "daily", "us-minute": "minute"}[src], a.symbols)
+    try:
+        if src == "binance":
+            binance.run(a.symbols)
+        elif src == "upbit":
+            upbit.run(a.symbols)
+        elif src == "macro":
+            macro.run(a.symbols)
+        elif src.startswith("kr"):
+            kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
+        elif src.startswith("us"):
+            us_stock.run({"us": "all", "us-daily": "daily", "us-minute": "minute"}[src], a.symbols)
+    except Exception as e:  # 수집기 전체가 죽는 오류는 숨기지 않고 알린다
+        notify.send(f"🔴 수집기 중단: {src}\n{type(e).__name__}: {str(e)[:500]}")
+        raise
 
 
 if __name__ == "__main__":

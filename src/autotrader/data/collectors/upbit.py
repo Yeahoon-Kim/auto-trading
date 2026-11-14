@@ -78,13 +78,14 @@ def _walk_back(market: str, to: pd.Timestamp | None, stop: pd.Timestamp) -> bool
     return reached
 
 
-def collect(market: str) -> None:
+def collect(market: str, phase: str) -> None:
+    """phase='latest': 마지막 수집 시점 → 지금, phase='backfill': 가장 오래된 시점 → 시작일."""
     st = store.get_state(DATASET, market)
     start = pd.Timestamp(config()["upbit"]["start_1m"], tz="UTC")
     try:
-        if st["last_ts"] is not None:  # 최신분
+        if phase == "latest" and st["last_ts"] is not None:
             _walk_back(market, None, st["last_ts"])
-        if not st["backfill_done"]:  # 과거분
+        elif phase == "backfill" and not st["backfill_done"]:
             done = _walk_back(market, st["first_ts"], start)
             store.set_state(DATASET, market, backfill_done=done)
     except Exception as e:
@@ -96,5 +97,6 @@ def run(symbols: list[str] | None = None) -> None:
     u = universe()
     if symbols:
         u = u[u["market"].isin(symbols)]
-    for m in u["market"]:
-        collect(m)
+    for phase in ("latest", "backfill"):  # 모든 코인을 최신으로 맞춘 뒤 과거분을 채운다
+        for m in u["market"]:
+            collect(m, phase)

@@ -15,6 +15,27 @@ orders:
   max_order_value_krw: 1000000  # 1회 주문 최대 금액 (실전 초기엔 작게)
   max_orders_per_minute: 20     # 버그로 인한 주문 폭주 방지
   require_limit_orders: true    # 시장가 주문 금지 (스캘핑 전략만 예외 허용 예정)
+  min_notional_check: true      # 계산된 주문 금액이 거래소 최소 주문 금액보다 작으면 BLOCK하고 사유 기록
+                                # (소액 계좌에서 비중 한도 × 자본 < 최소 주문이면 전략이 영원히 0주를 내는 문제 방지)
+
+data_staleness:
+  # 시세가 이 시간보다 오래되면 해당 시장 신규 주문 중단 (옛 데이터로 판단하지 않는다)
+  max_quote_age_sec: {kr_stock: 30, us_stock: 30, crypto: 10}
+  # 보유 포지션의 시세를 이 횟수 연속 못 받으면 "측정 불가 포지션"으로 보고 정리 + 알림
+  unmeasurable_retries: 3
+
+position_guard:
+  # 보유 포지션 감시 (전략이 정한 손절·목표가를 리스크팀이 독립적으로 집행)
+  enforce_stop_loss: true
+  enforce_take_profit: true
+  flat_before_close_min: {kr_stock: 10, us_stock: 10}   # 당일 청산 전략은 장 마감 N분 전 정리
+  check_interval_sec: 5
+
+approval:
+  # 실전 초기에는 주문마다 텔레그램 승인을 받는다 (응답 없으면 주문하지 않음)
+  live_manual_approval: true
+  approval_timeout_sec: 120
+  auto_after_live_trades: 20    # 실전 체결 N건이 문제없이 쌓이면 자동 모드 전환 검토
 
 live_gate:
   # lab 검증 기준은 labs/README.md. 여기서는 모의투자 → 실전 전환 조건만 다룸

@@ -106,6 +106,7 @@ def collect_minute(tickers: list[str]) -> None:
                 for t, df in _download(chunk, start=s.strftime("%Y-%m-%d"), end=e.strftime("%Y-%m-%d"),
                                        interval="1m").items():
                     store.write("us_1m", t, df)
+                    store.set_state("us_1m", t, backfill_done=True)  # 받을 수 있는 과거분(30일)은 매번 다 받음
             except Exception as ex:
                 logger.error(f"us_1m {chunk[0]}.. {s:%m-%d} 실패: {ex}")
         logger.info(f"us_1m {min(i + CHUNK, len(tickers))}/{len(tickers)}")

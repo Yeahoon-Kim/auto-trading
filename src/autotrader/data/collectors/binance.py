@@ -148,6 +148,44 @@ def collect_funding(symbol: str) -> None:
         logger.error(f"{dataset} {symbol} 실패: {e}")
 
 
+def collect_positioning(symbol: str) -> None:
+    """미결제약정(OI)과 계정 기준 롱/숏 비율, 1시간 단위. Binance가 최근 30일만 주므로 매일 누적."""
+    dataset, base = "binance_um_oi", "https://fapi.binance.com/futures/data"
+    st = store.get_state(dataset, symbol)
+    start = max(pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=29),
+                (st["last_ts"] + pd.Timedelta(hours=1)) if st["last_ts"] is not None else pd.Timestamp(0, tz="UTC"))
+    try:
+        frames = {}
+        for name, path in [("oi", "openInterestHist"), ("ls", "globalLongShortAccountRatio")]:
+            cursor, rows = int(start.timestamp() * 1000), []
+            while True:
+                _limit.wait()
+                page = get_json(_http, f"{base}/{path}",
+                                {"symbol": symbol, "period": "1h", "startTime": cursor, "limit": 500})
+                if not page:
+                    break
+                rows += page
+                if len(page) < 500:
+                    break
+                cursor = page[-1]["timestamp"] + 1
+            frames[name] = pd.DataFrame(rows)
+        oi, ls = frames["oi"], frames["ls"]
+        if oi.empty:
+            return
+        df = pd.DataFrame({"ts": pd.to_datetime(oi["timestamp"].astype("int64"), unit="ms", utc=True),
+                           "oi": oi["sumOpenInterest"].astype(float),
+                           "oi_value": oi["sumOpenInterestValue"].astype(float)})
+        if not ls.empty:
+            ls = pd.DataFrame({"ts": pd.to_datetime(ls["timestamp"].astype("int64"), unit="ms", utc=True),
+                               "long_short_ratio": ls["longShortRatio"].astype(float)})
+            df = df.merge(ls, on="ts", how="left")
+        store.write(dataset, symbol, df)
+        store.set_state(dataset, symbol, backfill_done=True)
+    except Exception as e:
+        store.set_state(dataset, symbol, status="error", error=str(e)[:500])
+        logger.error(f"{dataset} {symbol} 실패: {e}")
+
+
 def run(symbols: list[str] | None = None) -> None:
     u = universe()
     if symbols:
@@ -157,3 +195,4 @@ def run(symbols: list[str] | None = None) -> None:
         if row["has_perp"]:
             collect_klines("um", row["symbol"])
             collect_funding(row["symbol"])
+            collect_positioning(row["symbol"])
