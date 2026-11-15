@@ -24,7 +24,7 @@ execution:               # 비워 두면 비중만 계산 (자본 1 기준, 소�
   capital:               # 초기 자본 (예: 10000000). 주면 평가액·투입액·XIRR을 같이 낸다
   monthly_contribution:  # 매월 첫 봉 적립금 (예: 1000000)
   whole_shares: false    # true면 정수 주식만 (capital이나 적립금 필요)
-  rebalance: always      # always | on_change (목표가 바뀔 때·적립금 들어올 때만 매매)
+  rebalance: always      # always | on_change (바뀐 종목·적립금 때만, 비중 합이 1을 넘을 수 있음) | on_signal (신호를 낸 봉·목표가 바뀐 봉에 전 종목 맞춤, 월 리밸런싱용)
 
 data_snapshot: ""        # 사용한 데이터 스냅샷 ID (재현용)
 

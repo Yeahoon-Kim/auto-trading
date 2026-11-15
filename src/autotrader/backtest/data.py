@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -84,18 +85,23 @@ def dev_end(today=None) -> pd.Timestamp:
 def load(market: str, symbols: list[str] | str | None = None, start=None, end=None,
          timeframe: str = "1d", fields: tuple[str, ...] = ("open", "close"),
          lockbox: bool = False, today=None, currency: str | None = None,
-         dividend_tax: float | None = None) -> Panel:
+         dividend_tax: float | None = None, neutralize_jumps: bool = True) -> Panel:
     """symbols: None/"ALL" = 전체. kr_stock은 "KOSPI"/"KOSDAQ"도 받는다 (그날 소속 시장 기준).
     lockbox=False면 end를 dev_end()로 자른다.
     us_stock 전용:
       currency="KRW"  가격을 그날 원/달러(ECOS)로 환산 → 수익에 환율 변동 포함. close_usd·fx 필드가 같이 온다.
-      dividend_tax    배당 재투자 때 떼는 비율 (기본: settings us_stock.dividend_withholding_pct, 0이면 전액 재투자)."""
+      dividend_tax    배당 재투자 때 떼는 비율 (기본: settings us_stock.dividend_withholding_pct, 0이면 전액 재투자).
+    kr_stock 전용:
+      neutralize_jumps 가격제한을 넘는 하루 변동을 0으로 (수정계수에 빠진 감자·병합 등). 정리매매 구간은 제외.
+      항상 하는 처리: config/kr_exclude.yaml 종목 제외, 코드 재사용 분리, 주식수 기반 병합·감자 보정.
+      panel["tradable"] (거래량 > 0)을 같이 준다 → 엔진이 거래정지일에는 매매하지 않는다."""
     cut = dev_end(today)
     if not lockbox:
         end = min(pd.Timestamp(end), cut) if end is not None else cut
     fields = tuple(dict.fromkeys(("open", "close") + tuple(fields)))
     if market == "kr_stock":
-        long, meta = _kr(symbols, start, end, fields)
+        long, meta = _kr(symbols, start, end, fields, neutralize_jumps)
+        fields = fields + ("tradable",)
     elif market == "us_stock":
         long, meta = _us(symbols, start, end, fields, currency, dividend_tax)
         if currency == "KRW":
@@ -150,14 +156,18 @@ def _local_date(ts: pd.Series, tz: str) -> pd.Series:
     return ts.dt.tz_convert(tz).dt.tz_localize(None).dt.normalize()
 
 
-def _kr(symbols, start, end, fields):
+def _kr(symbols, start, end, fields, neutralize_jumps=True):
     tz = TZ["kr_stock"]
     if symbols in ("KOSPI", "KOSDAQ"):
         sym_where = f"market = '{symbols}'"
     else:
         sym_where = _sym_filter(symbols)
-    extra = [f for f in ("high", "low", "volume", "value", "market_cap", "shares") if f in fields]
-    cols = ", ".join(["ts", "symbol", "open", "close"] + extra)
+    extra = [f for f in ("high", "low", "value", "market_cap") if f in fields]
+    # shares: 병합·감자 보정, volume: 거래정지 판정에 항상 필요
+    cols = ", ".join(["ts", "symbol", "open", "close", "shares", "volume"] + extra)
+    excl = _kr_exclude()
+    if excl:
+        sym_where += f" AND symbol NOT IN ({', '.join(repr(s) for s in sorted(excl))})"
     src = _files("krx_1d", "ALL", start, end)
     if not src:
         return pd.DataFrame(), {}
@@ -176,18 +186,174 @@ def _kr(symbols, start, end, fields):
                       on=["date", "symbol"], how="left")
     else:
         px["factor"] = float("nan")
+    px = px.drop_duplicates(["date", "symbol"], keep="last").sort_values(["symbol", "date"]).reset_index(drop=True)
+    reused = _split_reused_codes(px)
     missing = int(px["factor"].isna().sum())
-    f = px["factor"].fillna(1.0)
+    g = px["symbol"]
+    fac = px["factor"].where(px["factor"] > 0)                 # 0 이하 계수는 오류
+    nonpos = int((px["factor"] <= 0).sum())
+    f = fac.groupby(g).ffill().groupby(g).bfill().fillna(1.0)  # 없는 날은 직전(없으면 다음) 계수, 그것도 없으면 1
     px["raw_close"] = px["close"]
     for c in ("open", "close", "high", "low"):
         if c in px:
             px[c] = px[c].where(px[c] > 0) * f          # 거래정지일 가격 0 → 결측
-    px = px.drop_duplicates(["date", "symbol"], keep="last")
-    return px, {"source": "krx_1d + kr_adj_factor", "rows": len(px), "rows_without_adj_factor": missing}
+    share_events = _fix_share_events(px)
+    jumps = _neutralize_jumps(px) if neutralize_jumps else {"neutralized": 0}
+    px["tradable"] = px["volume"] > 0          # 거래량 0 = 거래정지·무거래 (KRX는 종가를 직전 값으로 채운다)
+    px = px.drop(columns=[c for c in ("shares", "volume") if c not in fields])
+    return px, {"source": "krx_1d + kr_adj_factor", "rows": len(px), "excluded": len(excl),
+                "untradable_rows": int((~px["tradable"]).sum()), "rows_without_adj_factor": missing,
+                "adj_factor_nonpositive": nonpos, "reused_codes": reused, "share_events": share_events,
+                "jumps": jumps}
+
+
+KR_JUMP = 0.35        # 하루 가격제한(2015-06 이후 ±30%, 이전 ±15%)을 넘는 변동
+DELIST_TAIL = 15      # 상장폐지 종목의 마지막 N거래일(정리매매)은 가격제한이 없어 실제 폭락으로 둔다
+TAIL_UP_MAX = 1.0     # 단, 정리매매 구간이라도 하루 +100% 넘는 급등은 오류로 본다 (보수적: 이익을 지움)
+REUSE_GAP_DAYS = 30   # 같은 코드의 행 사이가 이만큼(달력일) 비면 다른 상장으로 본다 (KRX는 거래정지일에도 행을 준다)
+SHARE_EVENT = 1.5     # 상장주식수가 하루에 이 배수 이상 바뀌면 병합·감자·분할 후보
+LIMIT_CHANGE = pd.Timestamp("2015-06-15")   # 가격제한폭 ±15% → ±30%
+SHARE_LAG = 30        # 권리락 뒤 신주 상장까지 기다려 보는 거래일 수
+SHARE_LAG_TOL = 0.02  # 그 경우 시가총액 기준 변동이 이 안이어야 보정
+
+
+def _events(px: pd.DataFrame, flag: pd.Series) -> list[str]:
+    """보정한 (종목, 날짜) 목록 — 감사·교차검증용. "036220:2016-05-04" 형식."""
+    return (px.loc[flag, "symbol"] + ":" + px.loc[flag, "date"].dt.strftime("%Y-%m-%d")).tolist()
+
+
+def _kr_exclude() -> set[str]:
+    """config/kr_exclude.yaml: 투자회사(펀드)·데이터 오류 종목."""
+    p = store.ROOT / "config" / "kr_exclude.yaml"
+    return set((yaml.safe_load(p.read_text(encoding="utf-8")) or {}).get("exclude") or {}) if p.exists() else set()
+
+
+def _split_reused_codes(px: pd.DataFrame) -> dict:
+    """한 코드가 상장폐지 뒤 다른 회사에 다시 쓰인 경우(예: 036220 인포피아 2016 폐지 → 오상헬스케어 2024 상장)
+    행 사이 공백(REUSE_GAP_DAYS 초과)을 경계로 나눈다. 마지막 구간은 원래 코드를 그대로 쓰고,
+    앞 구간은 "코드@마지막날짜"(예: 036220@20160504)로 바꾼다 → 엔진이 그 구간 끝에서 상장폐지 청산한다.
+    px를 고친다 (종목·날짜순 전제)."""
+    g = px["symbol"]
+    new_seg = px["date"].groupby(g).diff() > pd.Timedelta(days=REUSE_GAP_DAYS)
+    if not new_seg.any():
+        return {"split": 0}
+    seg = new_seg.astype(int).groupby(g).cumsum()
+    last_seg = seg.groupby(g).transform("max")
+    old = seg < last_seg
+    seg_end = px["date"].groupby([g, seg]).transform("max")
+    codes = sorted(set(px.loc[new_seg, "symbol"]))
+    px.loc[old, "symbol"] = px.loc[old, "symbol"] + "@" + seg_end[old].dt.strftime("%Y%m%d")
+    px.sort_values(["symbol", "date"], inplace=True, ignore_index=True)
+    return {"split": len(codes), "codes": codes[:15]}
+
+
+def _limit(dates: pd.Series) -> pd.Series:
+    return pd.Series(np.where(dates < LIMIT_CHANGE, 0.15, 0.30), index=dates.index)
+
+
+def _scale_history(px: pd.DataFrame, step: pd.Series) -> None:
+    """step(그날의 배율, 기본 1)이 붙은 날 *이전* 가격 전체에 그 배율을 곱한다. 이후 가격(최근값)은 그대로.
+    종목·날짜순 전제. 여러 날이면 뒤에서부터 누적."""
+    g = px["symbol"]
+    scale = step[::-1].groupby(g[::-1]).cumprod()[::-1]     # 그날 포함 이후 배율의 곱
+    scale = scale.groupby(g).shift(-1).fillna(1.0)          # 다음 날부터의 곱 → 그날 이전 가격에 적용
+    for col in ("open", "close", "high", "low"):
+        if col in px:
+            px[col] = px[col] * scale
+
+
+def _delist_tail(px: pd.DataFrame) -> pd.Series:
+    """상장폐지 종목의 마지막 DELIST_TAIL거래일(정리매매)."""
+    last = px.groupby("symbol")["date"].transform("max")
+    from_end = px.groupby("symbol").cumcount(ascending=False)
+    return (last < px["date"].max() - pd.Timedelta(days=7)) & (from_end < DELIST_TAIL)
+
+
+def _fix_share_events(px: pd.DataFrame) -> dict:
+    """수정계수에 빠진 병합·감자·분할을 상장주식수 변화로 보정한다 (px를 고친다, 종목·날짜순 전제).
+    조건: 수정주가 하루 변동이 가격제한을 넘고, 같은 날 상장주식수가 SHARE_EVENT배 이상 바뀌었으며,
+    주식수 비율로 되돌린 변동(= 시가총액 변동)은 가격제한 안에 들어온다 (정리매매 구간은 -100%~+100%).
+    예: 196490 정지 중 30:1 병합, 203원 → 6,090원 (수정계수 1.0) → 시가총액 기준 0%.
+    보정: 그날 이전 가격 전체에 (이전 주식수 / 이후 주식수)를 곱한다 → 그날 수익 = 시가총액 변동."""
+    g = px["symbol"]
+    c = px["close"]
+    prev = c.groupby(g).ffill().groupby(g).shift()
+    sh = px["shares"].where(px["shares"] > 0)
+    s = sh / sh.groupby(g).ffill().groupby(g).shift()       # 이후/이전 주식수
+    r = c / prev
+    base = _limit(px["date"])
+    lim = base + 0.05
+    tail = _delist_tail(px)
+    cap_r = r * s - 1                                        # 시가총액 기준 하루 변동
+    big = ((r - 1).abs() > lim) & ((s >= SHARE_EVENT) | (s <= 1 / SHARE_EVENT))
+    ok = np.where(tail, cap_r.abs() <= 1.0, cap_r.abs() <= lim)
+    same_day = big & ok
+    # 권리락처럼 가격이 먼저 바뀌고 새 주식은 몇 주 뒤 상장되는 경우: SHARE_LAG거래일 뒤 주식수로 본다.
+    # 우연한 일치를 피하려고 시가총액 기준 변동이 거의 0(±SHARE_LAG_TOL)일 때만.
+    # 예: 900010 2010-04-30 무상증자 권리락 2,035원 → 1,700원(-16.5%), 주식수는 05-31에 48,000,000 → 57,600,000(×1.2).
+    s_fwd = sh.groupby(g).shift(-SHARE_LAG).fillna(sh.groupby(g).transform("last")) /         sh.groupby(g).ffill().groupby(g).shift()
+    lagged = ((r - 1).abs() > base + 0.005) & ((s_fwd - 1).abs() > 0.05) &         ((r * s_fwd - 1).abs() <= SHARE_LAG_TOL) & ~same_day & (s - 1).abs().lt(0.05).fillna(True)
+    flag = same_day | lagged
+    if not flag.any():
+        return {"fixed": 0}
+    k = (1 / s).where(same_day, (1 / s_fwd).where(lagged, 1.0)).fillna(1.0)
+    _scale_history(px, k)
+    syms = px.loc[flag, "symbol"]
+    return {"fixed": int(flag.sum()), "same_day": int(same_day.sum()), "lagged": int(lagged.sum()),
+            "symbols": int(syms.nunique()), "events": _events(px, flag)}
+
+
+def _neutralize_jumps(px: pd.DataFrame) -> dict:
+    """가격제한을 넘는 하루 변동(|수익| > 35%)을 0으로 만든다 (px를 고친다, 종목·날짜순 전제).
+    정상 거래일에는 나올 수 없는 변동이라, 수정계수에 빠진 감자·병합·분할(거래정지 뒤 재상장)이나
+    잘못된 계수로 본다. 예: 정지 중 35원 → 재상장 960원. 직전 유효 종가와 비교하므로 정지 기간을 건너뛴 점프도 잡는다.
+    예외: 상장폐지 종목의 마지막 15거래일(정리매매는 가격제한이 없고 폭락이 실제 손실).
+    그 구간에서도 하루 +100% 넘는 급등은 0으로 (예: 008080 원본가 1원 → 67,000원).
+    수익 0으로 둔 날 이전 가격 전체를 그 비율만큼 옮겨 이후 가격(최근값)은 그대로 둔다."""
+    g = px["symbol"]
+    c = px["close"]
+    prev = c.groupby(g).ffill().groupby(g).shift()
+    r = c / prev - 1
+    tail = _delist_tail(px)
+    # 거래가 없는 날(거래량 0)에 가격제한을 넘게 바뀐 값은 체결가가 아니라 정지 중 기준가 변경이다 (35% 미만도)
+    # 예: 182400 2025-08-06 감자 중 정지, 2,745 → 3,685원(+34%), 네이버 수정주가는 0%.
+    idle = (px["volume"] == 0) if "volume" in px else pd.Series(False, index=px.index)
+    flag = ((r.abs() > KR_JUMP) & ~tail) | (tail & (r > TAIL_UP_MAX)) |         (idle & (r.abs() > _limit(px["date"]) + 0.005) & ~tail)
+    if not flag.any():
+        return {"neutralized": 0, "kept_delisting_tail": int(((r.abs() > KR_JUMP) & tail).sum())}
+    # 플래그 날의 비율(c/prev)만큼 그 이전 가격을 곱해 이어 붙인다 → 그날 수익 0
+    _scale_history(px, (c / prev).where(flag, 1.0).fillna(1.0))
+    syms = px.loc[flag, "symbol"]
+    return {"neutralized": int(flag.sum()), "up": int((r[flag] > 0).sum()), "down": int((r[flag] < 0).sum()),
+            "symbols": int(syms.nunique()), "events": _events(px, flag),
+            "kept_delisting_tail": int(((r.abs() > KR_JUMP) & tail & ~flag).sum())}
 
 
 def _settings() -> dict:
     return yaml.safe_load((store.ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
+
+
+US_ADJ_STEP = 0.25   # 하루 수정비율(adj_close/close) 변화가 이보다 크면 배당일 수 없다 → 수정 오류
+
+
+def _fix_adj_steps(px: pd.DataFrame) -> dict:
+    """us_1d의 close는 이미 분할 반영, adj_close는 거기에 배당만 더한 값이다. 그래서 adj/close 비율은
+    배당락일에 조금씩만 바뀐다. 하루에 25% 넘게 바뀌었는데 원본가는 거의 그대로(±10%)이고 수정 수익만 ±25%를
+    넘으면 오류로 보고 그 변화를 없앤다 (px의 adj_close를 고친다).
+    예: DHR 2016-07-05 포티브 분사가 close와 adj_close에 이중 반영 → 수정 수익 +61% (원본 +3.6%).
+    실제 특별배당(KDP 2018, BKR 2017, LDOS 2016 등)은 원본가가 배당만큼 떨어지고 수정 수익은 평범하므로 건드리지 않는다."""
+    g = px["symbol"]
+    ratio = (px["adj_close"] / px["close"]).where(px["close"] > 0)
+    step = ratio / ratio.groupby(g).shift()
+    r_raw = px["close"] / px["close"].groupby(g).shift() - 1
+    r_adj = px["adj_close"] / px["adj_close"].groupby(g).shift() - 1
+    flag = ((step - 1).abs() > US_ADJ_STEP) & (r_adj.abs() > US_ADJ_STEP) & (r_raw.abs() < 0.10)
+    if not flag.any():
+        return {"fixed": 0}
+    k = step.where(flag, 1.0).fillna(1.0)
+    scale = k[::-1].groupby(g[::-1]).cumprod()[::-1].groupby(g).shift(-1).fillna(1.0)
+    px["adj_close"] = px["adj_close"] * scale                # 그날 이전 비율에 곱해 이어 붙임 (최근값 유지)
+    return {"fixed": int(flag.sum()), "examples": sorted(set(px.loc[flag, "symbol"]))[:15]}
 
 
 def _net_dividend_ratio(g: pd.DataFrame, tax: float) -> pd.Series:
@@ -225,6 +391,7 @@ def _us(symbols, start, end, fields, currency=None, dividend_tax=None):
         return px, {}
     px["date"] = _local_date(px["ts"], tz)
     px = px.drop_duplicates(["date", "symbol"], keep="last").sort_values(["symbol", "date"])
+    bad_adj = _fix_adj_steps(px)
     if dividend_tax is None:
         dividend_tax = _settings()["markets"]["us_stock"].get("dividend_withholding_pct", 0) / 100
     if dividend_tax:
@@ -234,7 +401,7 @@ def _us(symbols, start, end, fields, currency=None, dividend_tax=None):
     px["raw_close"] = px["close"]
     for c in ("open", "close", "high", "low"):
         px[c] = px[c] * ratio
-    meta = {"source": "us_1d (adj_close로 배당 재투자 수정)", "rows": len(px),
+    meta = {"source": "us_1d (adj_close로 배당 재투자 수정)", "rows": len(px), "bad_adj_steps": bad_adj,
             "dividend_tax": dividend_tax, "currency": "USD"}
     if currency == "KRW":
         fx = usdkrw(px["date"])
@@ -260,10 +427,18 @@ def _crypto(market, symbols, start, end, fields, timeframe):
     px = store.query(
         f"SELECT time_bucket(INTERVAL {n} {unit}, {t}) AS bucket, {sym} AS symbol, "
         f"arg_min(open, {t}) AS open, max(high) AS high, min(low) AS low, arg_max(close, {t}) AS close, "
-        f"sum(volume) AS volume, count(*) AS n_bars "
+        f"sum(volume) AS volume, count(*) AS n_bars, max({t}) AS last_ts "
         f"FROM read_parquet({src}, filename=true) WHERE {_bounds(start, end, 'UTC')} GROUP BY 1, 2")
     if px.empty:
         return px, {}
+    for col in ("bucket", "last_ts"):
+        if px[col].dt.tz is None:
+            px[col] = px[col].dt.tz_localize("UTC")
+    # 아직 끝나지 않은 마지막 봉(오늘 일봉 등)은 뺀다: 봉 끝이 그 종목의 마지막 1분봉보다 뒤면 미완성
+    step = pd.Timedelta(**{unit: n})
+    sym_last = px.groupby("symbol")["last_ts"].transform("max")
+    partial = px["bucket"] + step > sym_last + pd.Timedelta(minutes=1)
+    px = px[~partial]
     px["date"] = px["bucket"].dt.tz_convert("UTC").dt.tz_localize(None)
-    return px, {"source": f"{ds} → {timeframe}", "rows": len(px),
+    return px, {"source": f"{ds} → {timeframe}", "rows": len(px), "partial_bars_dropped": int(partial.sum()),
                 "note": "선물 펀딩비 미반영" if market == "crypto_futures" else ""}

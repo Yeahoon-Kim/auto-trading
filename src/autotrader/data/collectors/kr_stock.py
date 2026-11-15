@@ -109,8 +109,10 @@ def _daily_chunk(code: str, d1: str, d2: str, adjusted: bool) -> pd.DataFrame:
         "low": d["stck_lwpr"].astype(float), "close": d["stck_clpr"].astype(float),
         "volume": d["acml_vol"].astype(float), "value": d["acml_tr_pbmn"].astype(float),
     })
-    # 장 마감(15:30) 전이면 오늘 봉은 미완성이므로 제외
-    return df[df["ts"] + pd.Timedelta(hours=6, minutes=40) <= pd.Timestamp.now(tz="UTC")]
+    # 오늘 봉은 받지 않는다: 장중엔 미완성이고, 장 마감 뒤에도 종가가 KRX 공식 종가와 1~4% 다른 경우가 많다
+    # (2026-11-13 수집분 79% 불일치, 거래량은 같음 — 시간외 가격 반영 추정). 다음 날 수집 때 공식 종가로 받는다.
+    today = pd.Timestamp.now(tz=KST).normalize()
+    return df[df["ts"].dt.tz_convert(KST).dt.normalize() < today]
 
 
 def _daily_range(code: str, start: pd.Timestamp, adjusted: bool) -> pd.DataFrame:
