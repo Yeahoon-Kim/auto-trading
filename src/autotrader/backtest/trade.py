@@ -149,6 +149,9 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
     for f in ("open", "high", "low", "close"):
         if f not in panel:
             raise ValueError(f"신호형 백테스트에는 {f}가 필요하다 (lab.yaml fields에 high, low)")
+    if account.currency != "KRW" and not account.krw_per_unit:
+        # make_plan이 신호마다 ValueError를 내 전부 "신호 오류"로 조용히 막히는 것을 막는다
+        raise ValueError(f"계좌 통화 {account.currency}: lab.yaml paper.krw_per_unit이 필요하다 (주문 상한 환산용)")
     rcfg = backtest_risk_cfg(risk_cfg)
     sig = normalize(trades, panel)
     idx = panel.index
@@ -313,7 +316,9 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
     first = 1 if lo == 0 else 0
     tl = pd.DataFrame(log)
     open_rows = [{"symbol": s, "side": p["position"].side, "signal_ts": p["signal_ts"], "entry_ts": idx[p["entry_bar"]],
-                  "entry": p["position"].entry, "qty": p["position"].qty, "exit_kind": "open"} for s, p in pos.items()]
+                  "entry": p["position"].entry, "stop": p["position"].stop, "target": p["position"].target,
+                  "qty": p["position"].qty, "intraday": p["position"].intraday, "exit_kind": "open",
+                  "cost": p["cost_in"], "binding": p["binding"]} for s, p in pos.items()]
     if open_rows:
         tl = pd.concat([tl, pd.DataFrame(open_rows)], ignore_index=True)
     res = engine.Result(

@@ -202,3 +202,152 @@ def test_walk_forward_stitches_and_matches_rerun():
     assert set(st["exit_kinds"]) <= {"stop_loss", "take_profit", "flat_before_close", "delisted"}
     m = test.metrics(p.bars_per_year)
     assert np.isfinite(m["sharpe"])
+
+
+# ── 빠졌던 경우 ──
+def _multi(cols: dict, market="kr_stock", tradable=None) -> Panel:
+    """cols: {종목: [(o, h, l, c) 또는 None(가격 없음)]}"""
+    n = len(next(iter(cols.values())))
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    f = {}
+    for i, k in enumerate(("open", "high", "low", "close")):
+        f[k] = pd.DataFrame({s: [np.nan if b is None else b[i] for b in bars] for s, bars in cols.items()},
+                            index=idx, dtype=float)
+    if tradable is not None:
+        f["tradable"] = pd.DataFrame(tradable, index=idx)
+    return Panel(f, market)
+
+
+def test_delisted_position_force_closed_at_last_price():
+    p = _multi({"A": [FLAT, (100, 101, 99, 100), (97, 98, 96, 97), None, None],
+                "B": [FLAT] * 5})
+    res = _run(p, [_sig(p, stop=90.0, target=None)])
+    t = _only(res)
+    assert t["exit_kind"] == "delisted" and t["exit"] == 97.0 and t["exit_ts"] == p.index[3]
+    assert res.forced_exits == 1
+    assert res.equity.iloc[-1] == pytest.approx(1_000_000 - 1000 * 3)   # 10,000 / (100-90) = 1000주
+
+
+def test_untradable_bar_holds_and_blocks_entry():
+    # 거래 없는 날(셋째 봉)에는 저가가 손절 밑이어도 판정 보류
+    p = _multi({"A": [FLAT, (100, 101, 99, 100), (100, 100, 90, 100), (100, 101, 99, 100)]},
+               tradable={"A": [True, True, False, True]})
+    assert _only(_run(p, [_sig(p)]))["exit_kind"] == "open"
+    # 체결 봉이 거래 없는 날이면 미체결
+    res = _run(p, [_sig(p, 1)])
+    assert res.trades == 0 and res.meta["blocked"] == {"미체결": 1}
+
+
+def _hourly(days: list[list[tuple]], market="us_stock") -> Panel:
+    """하루 여러 봉 (UTC 14:00부터 1시간 간격)."""
+    ts = [pd.Timestamp("2020-01-01") + pd.Timedelta(days=d, hours=14 + h)
+          for d, bars in enumerate(days) for h in range(len(bars))]
+    flat = [b for bars in days for b in bars]
+    f = {k: pd.DataFrame({"A": [b[i] for b in flat]}, index=pd.DatetimeIndex(ts), dtype=float)
+         for i, k in enumerate(("open", "high", "low", "close"))}
+    return Panel(f, market, timeframe="1h")
+
+
+def test_intraday_hourly_flattens_only_on_last_bar_of_day():
+    p = _hourly([[FLAT, (100, 101, 99, 100.5), (100.5, 102, 100, 101), (101, 103, 100, 102)],
+                 [(102, 103, 101, 102)] * 2])
+    t = _only(_run(p, [_sig(p, 0, intraday=True)]))
+    assert t["exit_kind"] == "flat_before_close"
+    assert t["exit_ts"] == p.index[3] and t["exit"] == 102.0     # 그날 마지막 봉 종가, 중간 봉에선 안 함
+
+
+def test_foreign_account_converts_order_cap():
+    p = _panel([FLAT, (100, 101, 99, 100), FLAT], market="us_stock")
+    acct = trade.Account(capital=100_000, currency="USD", krw_per_unit=1000.0)
+    res = trade.run(p, [_sig(p)], NO_COST, acct, trade_cfg=TRADE)    # 기본 risk.yaml: 주문 상한 100만 원
+    t = _only(res)
+    assert t["qty"] == 10 and t["binding"] == "max_order_value"     # 100만 원 / 1000 = $1,000 / $100
+
+
+def test_foreign_account_without_fx_fails_loudly():
+    p = _panel([FLAT, FLAT], market="us_stock")
+    with pytest.raises(ValueError, match="krw_per_unit"):
+        trade.run(p, [_sig(p)], NO_COST, trade.Account(capital=100_000, currency="USD"))
+
+
+def test_atr_only_signal_uses_two_atr_stop():
+    p = _panel([FLAT, (100, 101, 99, 100), (99, 100, 95, 96), FLAT])
+    t = _only(_run(p, [_sig(p, stop=None, atr=2.0)]))
+    assert t["stop"] == 96.0 and t["qty"] == 2500                    # 100 - 2×2, 10,000 / 4
+    assert t["exit_kind"] == "stop_loss" and t["exit"] == 96.0
+
+
+def test_wrong_side_stop_is_blocked_not_crash():
+    p = _panel([FLAT, FLAT, FLAT])
+    res = _run(p, [_sig(p, stop=105.0)])
+    assert res.trades == 0 and list(res.meta["blocked"]) == ["신호 오류"]
+
+
+def test_walk_forward_fit_sees_only_train_window():
+    p = _walk(900)
+    seen = []
+
+    class S:
+        generate_trades = staticmethod(_breakout)
+
+        @staticmethod
+        def fit(train, params):
+            seen.append(train.index[-1])
+            return {**params, "n": 10 + len(seen)}
+
+    out = trade.walk_forward(S, p, {"n": 20}, NO_COST, ACCT, train="12M", test="6M", trade_cfg=TRADE, risk_cfg=RISK)
+    for w, last_train in zip(out["windows"], seen):
+        assert last_train < pd.Timestamp(w["test"][0])
+        assert w["params"]["n"] == 10 + seen.index(last_train) + 1
+
+
+def test_equity_equals_capital_plus_trade_pnl():
+    p = _walk(700, seed=11)
+    c = engine.Costs(fee_pct=0.015, slippage_pct=0.05, tax_pct_sell=0.2)
+    res = _run(p, _breakout(p, {"n": 15}), costs=c)
+    tl = res.meta["trade_log"]
+    closed = tl[tl["exit_kind"] != "open"]
+    assert len(closed) > 20
+    open_ = tl[tl["exit_kind"] == "open"]
+    mtm = sum(r.qty * (p.close["A"].iloc[-1] - r.entry) for r in open_.itertuples())
+    in_cost = sum(r.qty * r.entry * c.per_trade for r in open_.itertuples())
+    assert res.equity.iloc[-1] == pytest.approx(ACCT.capital + closed["pnl"].sum() + mtm - in_cost)
+
+
+# ── 독립 대조: replay.history (같은 규칙을 다르게 구현한 기존 코드) ──
+def test_matches_replay_history_on_random_sessions():
+    """하루 7봉 × 250일 무작위 장중 데이터. 매일 둘째 봉 종가에 판단 → 셋째 봉 시가(= 둘째 봉 종가) 진입,
+    당일 청산. replay.history도 같은 판정(손절 먼저, 미도달은 마감가)을 하므로 결과·R이 같아야 한다."""
+    from autotrader.backtest import replay
+
+    rng = np.random.default_rng(7)
+    days, plans = [], {}
+    for d in range(250):
+        c = 100 * np.exp(np.cumsum(rng.normal(0, 0.006, 7)))
+        o = np.concatenate([[c[0] * (1 + rng.normal(0, 0.003))], c[:-1]])    # 장중 시가 = 직전 종가
+        hi = np.maximum(o, c) * (1 + np.abs(rng.normal(0, 0.003, 7)))
+        lo = np.minimum(o, c) * (1 - np.abs(rng.normal(0, 0.003, 7)))
+        days.append(list(zip(o, hi, lo, c)))
+        side = "long" if rng.random() < 0.5 else "short"
+        e = c[1]
+        stop, tgt = (e * 0.995, e * 1.008) if side == "long" else (e * 1.005, e * 0.992)
+        plans[d] = (side, e, stop, tgt)
+    p = _hourly(days)
+    sigs = [{"ts": p.index[d * 7 + 1], "symbol": "A", "side": s, "stop": st, "target": tg, "intraday": True}
+            for d, (s, e, st, tg) in plans.items()]
+    res = _run(p, sigs)
+    tl = res.meta["trade_log"].reset_index(drop=True)
+    assert len(tl) == 250 and set(tl["exit_kind"]) <= {"stop_loss", "take_profit", "flat_before_close"}
+
+    sess, dates = {}, sorted({t.date() for t in p.index})
+    for d, date in enumerate(dates):
+        g = pd.DataFrame(days[d], columns=["open", "high", "low", "close"])
+        g.insert(0, "ts", p.index[d * 7:(d + 1) * 7])
+        sess[date] = g
+    order = {date: d for d, date in enumerate(dates)}
+    hist = replay.history(sess, lambda g: (1, *[plans[order[g["ts"].iloc[0].date()]][i] for i in (1, 2, 3)],
+                                            plans[order[g["ts"].iloc[0].date()]][0]))
+    kind = {"stop_loss": "stop", "take_profit": "target", "flat_before_close": "neither"}
+    assert [kind[k] for k in tl["exit_kind"]] == hist["outcome"].tolist()
+    assert tl["r"].to_numpy() == pytest.approx(hist["r"].to_numpy(), abs=1e-9)
+    assert (hist["outcome"] == "stop").sum() > 30 and (hist["outcome"] == "target").sum() > 30
