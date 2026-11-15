@@ -1,0 +1,2 @@
+# 훅은 sh 스크립트라 줄바꿈을 LF로 고정 (CRLF면 Windows Git에서 실행 실패)
+.githooks/* text eol=lf
