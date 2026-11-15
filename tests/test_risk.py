@@ -24,8 +24,8 @@ def cfg(**over):
 
 
 def sig(**kw):
-    base = dict(lab="L001", symbol="005930", market="kr_stock", side="long", price=50_000,
-                stop=48_000, reason="12-1 모멘텀 상위", ts=NOW, quote_ts=NOW - timedelta(seconds=5))
+    base = {"lab": "L001", "symbol": "005930", "market": "kr_stock", "side": "long", "price": 50_000,
+                "stop": 48_000, "reason": "12-1 모멘텀 상위", "ts": NOW, "quote_ts": NOW - timedelta(seconds=5)}
     return Signal(**{**base, **kw})
 
 
@@ -115,8 +115,8 @@ def test_min_notional_blocks_with_reason():
 # --- §9-5 보유 포지션 보호 ---
 
 def pos(**kw):
-    base = dict(lab="L001", symbol="005930", market="kr_stock", side="long", qty=10,
-                entry=50_000, stop=48_000, target=56_000)
+    base = {"lab": "L001", "symbol": "005930", "market": "kr_stock", "side": "long", "qty": 10,
+                "entry": 50_000, "stop": 48_000, "target": 56_000}
     return Position(**{**base, **kw})
 
 

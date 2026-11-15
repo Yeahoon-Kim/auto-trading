@@ -40,7 +40,7 @@ auto-trading/
 ## 시작하기
 
 ```bash
-uv sync --extra research --extra backtest --extra crypto --extra dev
+uv sync --extra research --extra backtest --extra crypto   # dev(pytest·ruff)는 기본 포함
 cp .env.example .env   # 그 다음 .env 에 API 키 입력
 ```
 
