@@ -78,4 +78,4 @@ US 주식 lab은 S&P500 매수 후 보유(`SPY_tr_wht`)와 같은 기간으로 �
 
 | ID | 이름 | 시장 | 유형 | 상태 | 판정 |
 |---|---|---|---|---|---|
-| — | | | | | |
+| L001 | [kr-momentum-regime](L001-kr-momentum-regime/README.md) — KR 12-1 모멘텀 + KOSPI 200일선 | kr_stock | classic | rejected | 2026-11-15 기준 1·3·4 실패 (Sharpe −0.13, MDD −85%) |
