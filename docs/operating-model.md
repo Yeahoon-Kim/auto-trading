@@ -73,6 +73,6 @@ validated lab ─▶ 운용데스크(paper, 코드) ─▶ 리스크 한도(PASS
 | 1 | 리서치 대기열 파일·형식 | 문서 | ✅ `labs/BACKLOG.md` |
 | 2 | lab별 시도 횟수 기록, validator가 반영 | `labs/_template`, validator 정의 | 진행 |
 | 3 | 23:00 마감 보고에 lab 진행 상태 추가 | `monitoring/` | ✅ "리서치 진행 상태" 절 (2026-11-16) |
-| 4 | 주간 회의 예약 작업 + ops-reporter 주간 모드 | `monitoring/` | 다음 후보 |
+| 4 | 주간 회의 예약 작업 + ops-reporter 주간 모드 | `monitoring/` | ✅ `monitoring/weekly_report.py`, `autotrader-weekly` 토 10:00 (2026-11-16, 등록은 병합 후) |
 | 5 | paper 운용데스크를 validated lab에 연결 | `execution/`, `runner/` | 대기 (validated lab이 나온 뒤) |
 | — | validator 의견서 위치 | validator 정의 | ✅ 이미 `labs/<lab>/validation.md`로 정해져 있음 |
