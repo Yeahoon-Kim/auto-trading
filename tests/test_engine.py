@@ -131,6 +131,23 @@ def test_mark_lockbox_keeps_comments(tmp_path):
     assert 'start: "2026-05-15"' in s and "opened: true   # 한 번" in s and "fee_pct:" in s
 
 
+def test_template_trials_block(tmp_path):
+    """템플릿 lab.yaml의 trials 블록이 읽히고, 잠금 구간 기록이 trials를 건드리지 않는다."""
+    import shutil
+    import yaml
+    from pathlib import Path
+    from autotrader.backtest.lab import _trials
+    f = tmp_path / "lab.yaml"
+    shutil.copy(Path(__file__).parents[1] / "labs" / "_template" / "lab.yaml", f)
+    assert _trials(yaml.safe_load(f.read_text(encoding="utf-8"))) == {"count": 0, "exposed_from": [], "log_entries": 0}
+    _mark_lockbox(f, "2026-05-15", "2026-11-13")
+    cfg = yaml.safe_load(f.read_text(encoding="utf-8"))
+    assert cfg["lockbox"]["opened"] is True and cfg["trials"]["count"] == 0
+    assert _trials({"trials": {"count": 3, "exposed_from": "L001", "log": ["a", "b"]}}) == \
+        {"count": 3, "exposed_from": ["L001"], "log_entries": 2}
+    assert _trials({})["count"] is None                         # 블록 없는 기존 lab도 동작
+
+
 # ── 적립금·정수 주식·리밸런싱 방식·세율 표·원화 환산·배당세 ──
 def test_monthly_contributions_flat_price():
     p = _panel({"A": [100.0] * 70}, start="2024-01-01")
