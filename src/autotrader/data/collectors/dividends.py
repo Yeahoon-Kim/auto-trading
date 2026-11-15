@@ -2,7 +2,11 @@
 
 - dart_dividend (symbol=ALL): 사업보고서 "배당에 관한 사항"(OpenDART alotMatter), 사업연도 2015~.
       회사·사업연도당 1행: 주당 현금배당금(보통·우선), 현금배당수익률, 현금배당성향, 배당총액, 주식배당 등.
-      ts = 결산일, filed = 접수번호 앞 8자리(접수일; 정정보고서면 정정일) → "filed 다음 날부터 알 수 있음".
+      ts = 결산일, filed = 접수번호 앞 8자리. DART는 최신(정정) 보고서를 주므로 filed가 정정일일 수 있다
+      (22%가 결산일 +120일 뒤). 최초 접수일은 first_filed()로 붙인다 → "최초 접수일 다음 날부터 알 수 있음".
+      (값은 정정 후 값이라, 정정이 배당 수치를 바꿨다면 최초 접수일 기준으로는 아주 약한 미래참조가 남는다.)
+- dart_periodic_filings (symbol=ALL): 2015~2023 정기보고서(사업·반기·분기) 목록, 정정 포함. 회사당 1회 백필.
+      2024~는 dart_disclosures에 있다. first_filed()가 둘을 합쳐 (회사, 보고서 종류, 기간)별 최초 접수일을 준다.
       값은 사업연도 연간 합계(중간·분기배당 포함). 상장폐지 종목도 DART 고유번호가 있으면 들어간다.
       회사당 연 1회 호출이라 하루 호출 한도(약 2만, dart_disclosures·dart_fin과 공유) 때문에
       실행마다 최대 dart_max_calls 만큼 진행하고 다음 실행에 이어받는다.
@@ -10,8 +14,11 @@
 - us_dividends (symbol=ALL): Alpaca corporate actions v1, 현금·주식배당, 배당락일 2016~.
       날짜 창으로 시장 전체를 받으므로 상장폐지 종목도 들어 있다(생존편향 없음). rate는 원본(분할 미반영) 주당 금액.
       공시일이 없다 → ts = 배당락일(ex_date). 배당은 배당락 전에 발표되므로 "ex_date에 알 수 있음"은 보수적이다.
-- us_dividend_announcements (symbol=ALL): Alpaca corporate action announcements v2, 2020~.
-      **declaration_date(이사회 결의·발표일)** 가 있다 → ts = declaration_date, "다음 날부터 알 수 있음".
+- us_dividend_announcements (symbol=ALL): Alpaca corporate action announcements v2, 2020~. ts = declaration_date.
+      주의: 이 declaration_date는 실제 이사회 결의일이 아니다. 2022~는 대개 배당락 1~4일 전(AAPL 2026-02 배당:
+      실제 결의 1/29, 여기 2/5), 2020~21은 배당락 뒤 날짜도 많다(나중에 채운 기록). 실제보다 늦으므로
+      "다음 날부터 알 수 있음"으로 써도 미래참조는 없지만, 발표 이벤트 전략의 공시일로 쓰면 안 된다.
+      2020~21에는 뮤추얼펀드(5글자 티커)가 많이 섞여 있다.
 키: DART_API_KEY, ALPACA_API_KEY/ALPACA_SECRET_KEY (없으면 해당 소스는 건너뛴다).
 """
 
@@ -39,6 +46,7 @@ _FIELDS = [  # (se 라벨에 들어 있는 말, 컬럼). 공백 제거 후 비�
     ("주식배당금총액", "stock_div_total"), ("주당순이익", "eps"), ("당기순이익", "net_income"),
     ("주당액면가액", "face_value"),
 ]
+PARSER = 2  # 파싱 규칙을 고치면 올린다 → 영향받는 행만 다시 받는다 (todo_pairs)
 PER_CLASS = {"dps", "stock_dps", "cash_yield", "stock_yield"}  # 보통주·우선주 따로 나오는 항목
 COLUMNS = ["face_value", "net_income", "eps", "cash_div_total", "stock_div_total", "payout_ratio",
            "dps_common", "dps_pref", "cash_yield_common", "cash_yield_pref",
@@ -47,7 +55,8 @@ COLUMNS = ["face_value", "net_income", "eps", "cash_div_total", "stock_div_total
 
 def parse_alot(rows: list[dict]) -> dict:
     """alotMatter 한 회사·한 보고서의 list → {컬럼: 값}. 금액 단위는 원본 그대로
-    (배당총액·순이익 백만원, 주당 값 원, 비율 %). 순이익·EPS는 연결 우선."""
+    (배당총액·순이익 백만원, 주당 값 원, 비율 %). 순이익·EPS는 연결 우선.
+    주식 종류(stock_knd)가 "-"로 오는 회사도 있다 → 그때는 순서대로 보통주, 우선주."""
     out: dict = {}
     for r in sorted(rows, key=lambda r: "연결" not in r.get("se", "")):  # 연결 행을 먼저
         se = r.get("se", "").replace(" ", "")
@@ -58,9 +67,11 @@ def parse_alot(rows: list[dict]) -> dict:
             knd = r.get("stock_knd", "")
             if "우선" in knd:
                 col += "_pref"
-            elif "보통" in knd:
+            elif "보통" in knd or f"{col}_common" not in out:
                 col += "_common"
-            else:
+            elif "-" in knd or not knd.strip():
+                col += "_pref"
+            else:  # 종류주 등
                 continue
         if col in out:
             continue
@@ -86,7 +97,7 @@ def _alot_row(corp_code: str, symbol: str, year: int, rows: list[dict], fetched:
         "corp_code": corp_code, "symbol": symbol, "bsns_year": year, "reprt_code": "11011",
         "rcept_no": rcept,
         "filed": _kst_ts(pd.Series([rcept[:8]])).iloc[0] if rcept else pd.NaT,
-        "has_data": bool(rows), "fetched": fetched, **{c: vals.get(c) for c in COLUMNS},
+        "has_data": bool(rows), "fetched": fetched, "parser": PARSER, **{c: vals.get(c) for c in COLUMNS},
     }
 
 
@@ -99,7 +110,12 @@ def todo_pairs(codes: pd.DataFrame, years: range, done: pd.DataFrame, now: pd.Ti
         d = done.copy()
         d["fetched"] = pd.to_datetime(d["fetched"], utc=True)
         deadline = pd.to_datetime((d["bsns_year"] + 1).astype(str) + "-07-01", utc=True)
-        ok = d["has_data"] | (d["fetched"] >= deadline) | (d["fetched"] > now - pd.Timedelta(days=14))
+        ver = d["parser"].fillna(1) if "parser" in d else pd.Series(1, index=d.index)
+        # 1판 파서는 stock_knd가 "-"인 회사의 주당배당금을 놓쳤다 → 배당총액은 있는데 DPS가 빈 행은 다시
+        col = lambda c: d[c] if c in d else pd.Series(float("nan"), index=d.index)
+        stale = (ver < PARSER) & col("dps_common").isna() & (col("cash_div_total").fillna(0) > 0)
+        ok = (d["has_data"] & ~stale) | (~d["has_data"] & ((d["fetched"] >= deadline)
+                                                            | (d["fetched"] > now - pd.Timedelta(days=14))))
         final = set(zip(d.loc[ok, "corp_code"], d.loc[ok, "bsns_year"].astype(int)))
     out = []
     for y in years:  # 오래된 연도부터 (재시작해도 같은 순서)
@@ -109,13 +125,9 @@ def todo_pairs(codes: pd.DataFrame, years: range, done: pd.DataFrame, now: pd.Ti
     return out
 
 
-def collect_dart_dividend() -> None:
+def collect_dart_dividend(budget: list[int]) -> None:
     ds = "dart_dividend"
-    if not os.environ.get("DART_API_KEY"):
-        logger.info(f"{ds}: DART_API_KEY 없음 → 건너뜀")
-        return
     cfg = config().get("dividends", {})
-    budget = int(cfg.get("dart_max_calls", 8000))
     now = pd.Timestamp.now(tz="UTC")
     buf: list[dict] = []
     calls = 0
@@ -124,9 +136,10 @@ def collect_dart_dividend() -> None:
         prev = store.read(ds, "ALL")
         years = range(int(cfg.get("dart_start_year", 2015)), now.tz_convert(KST).year)
         todo = todo_pairs(codes, years, prev, now)
-        for corp, sym, y in todo[:budget]:
+        for corp, sym, y in todo[:max(0, budget[0])]:
             status, rows = _alot(corp, y)
             calls += 1
+            budget[0] -= 1
             if status == "020":  # 하루 한도 초과 → 다음 실행에 이어서
                 logger.warning(f"{ds}: DART 호출 한도 도달")
                 break
@@ -143,6 +156,101 @@ def collect_dart_dividend() -> None:
     except Exception as e:
         if buf:
             store.write(ds, "ALL", pd.DataFrame(buf), key=["corp_code", "bsns_year", "reprt_code"])
+        store.set_state(ds, "ALL", status="error", error=str(e)[:500])
+        logger.error(f"{ds} 실패: {e}")
+
+
+# ── KR: 정기보고서 최초 접수일 ──
+# alotMatter·fnlttMultiAcnt는 최신(정정) 보고서의 접수번호를 준다 → 정정이 있으면 filed가 몇 년 늦어진다
+# (예: 현대차 2015 사업보고서 → 2022-02 정정일). 최초 접수일은 공시 목록에서 얻는다.
+# 2024~는 dart_disclosures에 이미 있으므로, 여기서는 그 전(2015~2023)만 회사당 1회 받는다.
+FILINGS_DS, FILINGS_END = "dart_periodic_filings", "20231231"
+_PERIOD = r"(사업보고서|반기보고서|분기보고서)\s*\((\d{4}\.\d{2})\)"
+
+
+def parse_filings(d: pd.DataFrame) -> pd.DataFrame:
+    """공시 목록(report_nm, rcept_no, rcept_dt|ts, corp_code, stock_code|symbol) → 정기보고서 행.
+    period = 보고서 기간 끝 'YYYY.MM', correction = 정정·첨부 보고서 여부."""
+    if d.empty:
+        return pd.DataFrame()
+    m = d["report_nm"].str.extract(_PERIOD)
+    d = d.assign(kind=m[0], period=m[1]).dropna(subset=["kind"])
+    ts = d["ts"] if "ts" in d else _kst_ts(d["rcept_dt"])
+    return pd.DataFrame({
+        "ts": ts, "rcept_no": d["rcept_no"], "corp_code": d["corp_code"],
+        "symbol": (d["symbol"] if "symbol" in d else d["stock_code"]).str.strip(),
+        "kind": d["kind"], "period": d["period"], "report_nm": d["report_nm"].str.strip(),
+        "correction": d["report_nm"].str.strip().str.startswith("["),
+    })
+
+
+def first_filed() -> pd.DataFrame:
+    """(corp_code, kind, period)별 최초 접수일. dart_periodic_filings(2015~2023) + dart_disclosures(2024~).
+    dart_dividend는 kind='사업보고서', period=결산일 'YYYY.MM'으로 붙인다:
+        dv['period'] = dv['ts'].dt.tz_convert('Asia/Seoul').dt.strftime('%Y.%m')"""
+    parts = [store.read(FILINGS_DS, "ALL"), parse_filings(store.read("dart_disclosures", "ALL"))]
+    f = pd.concat([p for p in parts if not p.empty], ignore_index=True)
+    if f.empty:
+        return f
+    return (f.groupby(["corp_code", "kind", "period"], as_index=False)
+            .agg(first_filed=("ts", "min"), last_filed=("ts", "max"), n_filings=("rcept_no", "nunique")))
+
+
+def _filings(corp_code: str, start_year: int) -> tuple[str, pd.DataFrame, int]:
+    rows, page, calls = [], 1, 0
+    while True:
+        _dart_limit.wait()
+        calls += 1
+        j = get_json(_http, "https://opendart.fss.or.kr/api/list.json",
+                     {"crtfc_key": os.environ["DART_API_KEY"], "corp_code": corp_code, "bgn_de": f"{start_year}0101",
+                      "end_de": FILINGS_END, "pblntf_ty": "A", "page_no": page, "page_count": 100})
+        status = j.get("status", "")
+        if status != "000":
+            return status, pd.DataFrame(rows), calls
+        rows += j["list"]
+        if page >= int(j["total_page"]):
+            return status, pd.DataFrame(rows), calls
+        page += 1
+
+
+def collect_dart_filings(budget: list[int]) -> None:
+    """회사당 한 번(2015~2023 정기보고서 목록). 진행은 (dataset, corp_code) 수집 상태로 남긴다."""
+    ds = FILINGS_DS
+    try:
+        codes = _corp_codes()
+        start = int(config().get("dividends", {}).get("dart_start_year", 2015))
+        todo = [c for c in codes["corp_code"] if not store.get_state(ds, c)["backfill_done"]]
+        buf: list[pd.DataFrame] = []
+        got: list[str] = []
+
+        def flush() -> None:
+            df = pd.concat(buf, ignore_index=True) if buf else pd.DataFrame()
+            store.write(ds, "ALL", df, key=["rcept_no"])
+            for c in got:  # 저장한 뒤에 완료 표시 (중간에 죽어도 빠지는 회사가 없게)
+                store.set_state(ds, c, backfill_done=True)
+            buf.clear()
+            got.clear()
+
+        done = 0
+        for corp in todo:
+            if budget[0] <= 0:
+                break
+            status, d, calls = _filings(corp, start)
+            budget[0] -= calls
+            if status == "020":
+                logger.warning(f"{ds}: DART 호출 한도 도달")
+                budget[0] = 0
+                break
+            if status not in ("000", "013"):
+                raise RuntimeError(f"DART list {status}")
+            buf.append(parse_filings(d))
+            got.append(corp)
+            done += 1
+            if len(got) >= 200:
+                flush()
+        flush()
+        logger.info(f"{ds} 이번 실행 {done:,}개사, 남은 {len(todo) - done:,}개사")
+    except Exception as e:
         store.set_state(ds, "ALL", status="error", error=str(e)[:500])
         logger.error(f"{ds} 실패: {e}")
 
@@ -276,4 +384,10 @@ def run(symbols: list[str] | None = None) -> None:
     else:
         collect_us_dividends(headers)
         collect_us_announcements(headers)
-    collect_dart_dividend()  # 오래 걸리고 한도 소진형이라 마지막에
+    if not os.environ.get("DART_API_KEY"):
+        logger.info("dart_dividend: DART_API_KEY 없음 → 건너뜀")
+        return
+    # 오래 걸리고 한도 소진형이라 마지막에. 두 수집기가 실행당 호출 상한을 나눠 쓴다
+    budget = [int(config().get("dividends", {}).get("dart_max_calls", 8000))]
+    collect_dart_filings(budget)  # 회사당 1회, 약 3천 호출로 끝남
+    collect_dart_dividend(budget)

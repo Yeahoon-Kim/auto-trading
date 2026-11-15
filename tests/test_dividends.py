@@ -88,3 +88,42 @@ def test_parse_ca_and_ann():
     assert a["ts"].iloc[0] == pd.Timestamp("2024-02-08", tz="America/New_York")  # 공시일
     assert a["cash"].iloc[0] == 0.24 and a["ex_date"].iloc[0] == pd.Timestamp("2024-02-09")
     assert dv.parse_ann([]).empty
+
+
+def test_parse_alot_stock_knd_dash():
+    """stock_knd가 "-"로 오는 회사(SK하이닉스 2016): 순서대로 보통주, 우선주."""
+    rows = [{"se": "(연결)현금배당성향(%)", "stock_knd": "-", "thstrm": "14.30"},
+            {"se": "현금배당수익률(%)", "stock_knd": "-", "thstrm": "1.30"},
+            {"se": "현금배당수익률(%)", "stock_knd": "-", "thstrm": "-"},
+            {"se": "주당 현금배당금(원)", "stock_knd": "-", "thstrm": "600"},
+            {"se": "주당 현금배당금(원)", "stock_knd": "-", "thstrm": "-"}]
+    v = dv.parse_alot(rows)
+    assert v["dps_common"] == 600 and v["dps_pref"] is None and v["cash_yield_common"] == 1.3
+
+
+def test_todo_pairs_reparse_old_parser():
+    codes = pd.DataFrame({"corp_code": ["A", "B"], "symbol": ["1", "2"]})
+    done = pd.DataFrame({"corp_code": ["A", "B"], "bsns_year": [2016, 2016], "has_data": [True, True],
+                         "fetched": pd.to_datetime(["2026-11-16", "2026-11-16"], utc=True),
+                         "dps_common": [None, 500.0], "cash_div_total": [423_601.0, 100.0]})
+    # A: 1판 파서(parser 열 없음)에서 배당총액은 있는데 DPS가 빔 → 다시 받는다
+    assert dv.todo_pairs(codes, range(2016, 2017), done, pd.Timestamp("2026-11-17", tz="UTC")) == [("A", "1", 2016)]
+    done["parser"] = dv.PARSER
+    assert dv.todo_pairs(codes, range(2016, 2017), done, pd.Timestamp("2026-11-17", tz="UTC")) == []
+
+
+def test_parse_filings_first_filed(monkeypatch):
+    raw = pd.DataFrame({
+        "report_nm": ["사업보고서 (2015.12)", "[기재정정]사업보고서 (2015.12)", "반기보고서 (2016.06)", "주요사항보고서(자기주식취득결정)"],
+        "rcept_no": ["20160330000001", "20220216000002", "20160816000003", "20160901000004"],
+        "rcept_dt": ["20160330", "20220216", "20160816", "20160901"],
+        "corp_code": ["00164742"] * 4, "stock_code": ["005380"] * 4,
+    })
+    f = dv.parse_filings(raw)
+    assert len(f) == 3 and f["correction"].tolist() == [False, True, False]
+    assert f["period"].tolist() == ["2015.12", "2015.12", "2016.06"]
+
+    monkeypatch.setattr(dv.store, "read", lambda ds, sym: f if ds == dv.FILINGS_DS else pd.DataFrame())
+    ff = dv.first_filed().set_index(["kind", "period"])
+    row = ff.loc[("사업보고서", "2015.12")]
+    assert row["first_filed"] == pd.Timestamp("2016-03-30", tz="Asia/Seoul") and row["n_filings"] == 2

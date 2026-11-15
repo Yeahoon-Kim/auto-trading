@@ -40,8 +40,9 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 | `dart_disclosures` (symbol=ALL) | 전체 상장사 공시 목록 (접수번호, 종목, 보고서명, 제출인) | OpenDART | 2024~ (하루 1.5만 호출씩 백필) | 매일 |
 | `dart_fin` (symbol=ALL) | 상장사 **주요계정 재무**: 매출·영업이익·세전이익·순이익·총포괄손익(3개월 값 + `_cum` 누적), 유동·비유동 자산·부채, 자본금·이익잉여금·자본총계. 연결 우선, 없으면 별도. `filed` = 실제 접수일 | OpenDART `fnlttMultiAcnt` | 2015~, 2015년 이후 KRX 상장 종목(상장폐지 포함 중 DART 매핑되는 것) | 매일 (최근 2개 사업연도 재수집) |
 | `dart_dividend` (symbol=ALL) | 사업보고서 **배당에 관한 사항**: 주당 현금배당금(`dps_common`·`dps_pref`, 원, 중간·분기배당 포함 연간 합계), 현금배당수익률(%), 현금배당성향(%), 현금·주식배당 총액(백만원), 주당 주식배당, 순이익·EPS(연결 우선). 회사·사업연도당 1행, 배당 기록 없음은 `has_data=False`. `ts` = 결산일, `filed` = 접수일 | OpenDART `alotMatter` | 사업연도 2015~, `dart_fin`과 같은 종목(상장폐지 포함) | 매일 (실행당 8천 호출씩 백필 → 이후 새 사업보고서만) |
+| `dart_periodic_filings` (symbol=ALL) | 2015~2023 정기보고서(사업·반기·분기) 목록, 정정 포함: `ts`(접수일), `rcept_no`, `kind`, `period`('YYYY.MM'), `correction`. 2024~는 `dart_disclosures`에 있다. `dividends.first_filed()`가 둘을 합쳐 최초 접수일을 준다 | OpenDART 공시 목록 (회사별) | `dart_fin`과 같은 종목 | 회사당 1회 |
 | `us_dividends` (symbol=ALL) | 미국 **현금·주식배당**: `ts` = 배당락일, `rate`(주당 금액, 원본·분할 미반영), `record_date`, `payable_date`, `special`, `foreign`, `cusip`. ETF·펀드 포함 | Alpaca corporate actions v1 (키 필요) | **시장 전체**(상장폐지 포함), 배당락 2016~ | 매일 (최근 150일 + 발표된 90일 앞까지 재수집) |
-| `us_dividend_announcements` (symbol=ALL) | 미국 배당 **발표**: `ts` = **declaration_date**(발표일), `cash`, `ex_date`, `record_date`, `payable_date`, `sub_type` | Alpaca corporate action announcements v2 (키 필요) | 시장 전체, 발표일 2020~ | 매일 (최근 30일 재수집) |
+| `us_dividend_announcements` (symbol=ALL) | 미국 배당 발표 기록: `ts` = Alpaca `declaration_date` (**실제 결의일이 아님**, 아래 한계 참고), `cash`, `ex_date`, `record_date`, `payable_date`, `sub_type` | Alpaca corporate action announcements v2 (키 필요) | 시장 전체(2020~21은 뮤추얼펀드 다수), 2020~ | 매일 (최근 30일 재수집) |
 | `news` (symbol=ALL) | 미국 주식·코인 뉴스 (Benzinga): `id`, `ts`(기사 작성 시각), `updated_at`, `symbols`(쉼표로 이은 티커, 코인은 `BTCUSD`), `headline`, `summary`, `source`, `url`. 본문 없음 | Alpaca News API 무료 플랜 (키 필요) | 2015-01~ | 매일 |
 | `ecos` | 기준금리, 국고채 3·10년, 회사채 AA- 3년, CD 91일, 원/달러 | 한국은행 ECOS | 2005~ | 매일 |
 | `legacy/*.parquet` | 기존 stock-analysis-site DB에서 가져온 것: 일봉(KR 3,259·US 5,487종목, 2016-08~ +시가총액), 실제 지수 구성종목, 재무제표(K-IFRS 349사·US GAAP 511사, 2021~), 공시(SEC 1995~, DART 2024-08~), 내부자 거래(SEC Form 4 2000~) | Docker Postgres (1회 가져오기) | 표 참고 | 수동 (`collect legacy`) |
@@ -68,9 +69,9 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
   - 정정: DART는 최신(정정) 값을 준다. 정정된 보고서는 `filed`가 정정일이라 시점은 보수적이다. 다만 정정 전 원래 값은 남지 않는다.
   - 업종: 금융업은 계정이 달라 매출액·영업이익이 비는 경우가 있다 (영업수익 등).
 - **배당 데이터 시점** (검토: `docs/research/2026-11-16-dividend-data-sources.md`):
-  - `dart_dividend`: `filed` 다음 날부터 알 수 있다. 사업보고서는 3월에 나오므로 배당결정 공시(보통 2월, `dart_disclosures`의 "현금ㆍ현물배당결정")보다 늦다 → 보수적. 정정보고서면 `filed`가 정정일이다.
-  - `us_dividends`: 공시일이 없다. 배당은 배당락 전에 발표되므로 `ts`(배당락일)부터 쓰면 미래참조는 없지만 늦다. 2020년 이후는 `us_dividend_announcements`의 발표일을 쓴다.
-  - `us_dividend_announcements`: `ts`(발표일) 다음 날부터 알 수 있다.
+  - `dart_dividend`: DART가 최신(정정) 보고서를 주므로 `filed`가 정정일인 행이 많다 (결산일 +120일 넘는 행 22%, +1년 넘는 행 6%. 예: 현대차 2015 → 2022-02). **최초 접수일**(`collectors.dividends.first_filed()`, `kind='사업보고서'`, `period`=결산 'YYYY.MM') 다음 날부터 쓴다. 값은 정정 후 값이라 정정이 배당 수치를 바꿨다면 아주 약한 미래참조가 남는다. 사업보고서(3월)는 배당결정 공시(보통 2월, `dart_disclosures`의 "현금ㆍ현물배당결정")보다 늦다 → 그 점에선 보수적. 같은 문제가 `dart_fin`에도 있으니 재무 전략도 `first_filed()`를 쓰면 된다.
+  - `us_dividends`: 공시일이 없다. 배당은 배당락 전에 발표되므로 `ts`(배당락일)부터 쓰면 미래참조는 없지만 늦다 (실제 발표는 보통 1~4주 전).
+  - `us_dividend_announcements`: Alpaca의 `declaration_date`는 실제 결의일보다 늦다 (2022~ 대개 배당락 1~4일 전, 2020~21은 배당락 뒤도 많음). `ts` 다음 날부터 쓰면 미래참조는 없지만 **발표 이벤트 시점으로 쓰면 안 된다.** 실제 결의일이 필요하면 다른 소스가 필요하다 (리서치 문서 참고).
   - `kr_adj_factor`는 분할·증자만 반영하고 **배당은 반영하지 않는다** (삼성전자 수정계수는 2018-05 액면분할 외 변화 없음). KR 총수익은 `dart_dividend` 등으로 따로 더해야 한다.
 - **legacy 재무제표 (US)**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다. 같은 기간 중복과 9개월 누적 행이 섞여 있다.
 - **legacy US 일봉**: 분할 반영 가격이고 상장폐지 종목이 없다 (생존편향).
