@@ -1,7 +1,7 @@
 id: L001
 name: kr-momentum-regime
 version: 1               # 잠금 구간을 본 뒤 전략을 고치면 +1 하고 다시 검증
-status: backtesting           # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
+status: rejected              # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
 category: classic        # classic | intraday | algo | arbitrage | llm
 
 llm:                     # category: llm 일 때만
