@@ -6,7 +6,8 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     # 데이터/분석
     "pandas>=2.2",
-    "numpy>=2.0",
+    # numpy 2.5는 pandas 2.3.x(Windows에서 잠긴 버전)와 만나면 Timedelta마다 DeprecationWarning을 낸다
+    "numpy>=2.0,<2.5",
     "pyarrow>=17",          # parquet 저장
     "duckdb>=1.1",          # 로컬 데이터 쿼리
     # 설정/유틸
@@ -42,6 +43,8 @@ crypto = [
     "ccxt>=4.4",            # 거래소 공통 인터페이스 (차익거래용 다거래소)
     "python-binance>=1.0",
 ]
+[dependency-groups]
+# uv sync / uv run이 기본으로 설치 → `uv run pytest`가 바로 동작
 dev = [
     "pytest>=8.3",
     "ruff>=0.7",
