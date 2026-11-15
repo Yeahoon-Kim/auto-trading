@@ -265,6 +265,10 @@ def report(s: dict) -> str:
              f"매도세 {_tax(s['costs']['tax_pct_sell'])}",
              f"- 데이터: {s['data'].get('source')}  ·  생존편향: {s['data'].get('survivorship')}",
              ]
+    j = s["data"].get("jumps") or {}
+    if j.get("neutralized"):
+        lines.append(f"- 가격제한(±35%) 초과 하루 변동 {j['neutralized']:,}건({j['symbols']}종목)을 수익 0으로 처리 "
+                     f"(수정계수에 빠진 감자·병합 등). 상장폐지 직전 정리매매 {j.get('kept_delisting_tail', 0)}건은 실제 손실로 유지")
     if s["data"].get("rows_without_adj_factor"):
         lines.append(f"- 수정계수 없는 행 {s['data']['rows_without_adj_factor']:,}개 (원본가 사용)")
     if "causality" in s:
@@ -326,8 +330,9 @@ def main(argv=None) -> None:
     ap.add_argument("--lockbox", action="store_true", help="잠금 구간을 연다 (lab당 1회)")
     ap.add_argument("--quick", action="store_true", help="파라미터 민감도 생략")
     a = ap.parse_args(argv)
-    if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
-        sys.stdout.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):      # Windows 콘솔(cp949)에서 한글·기호가 깨지지 않게
+        if stream.encoding and stream.encoding.lower() != "utf-8":
+            stream.reconfigure(encoding="utf-8")
     lab_dir = a.lab.resolve()
     open_lockbox(lab_dir) if a.lockbox else develop(lab_dir, a.quick)
 

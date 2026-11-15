@@ -10,6 +10,7 @@ lab의 strategy.py는 generate_signals(data, params)로 '봉 t 종가 시점에 
 - 1.0 = 자산 100%. 합이 1 미만이면 나머지는 현금(이자 0). 음수는 공매도(선물). 합이 1 초과면 레버리지.
 - 신호 표에 없는 날짜는 직전 비중 유지(ffill), 처음 신호 전은 0. NaN 비중은 0.
 - 체결 가격이 없는 종목(거래정지 등)은 그 봉에 매매하지 않고 기존 보유 유지.
+  panel에 "tradable"(날짜×종목 bool)이 있으면 False인 날도 매매하지 않는다 (kr_stock: 거래량 0인 날 — 종가가 직전 값 복사라 next_close에서도 막는다).
 - 상장폐지(마지막 가격 이후 데이터 없음): 마지막 가격 다음 봉에 그 가격으로 강제 청산 (비용·세금 부과).
   실제 정리매매는 더 낮은 값에 팔리는 경우가 많아 이 가정은 낙관적이다 — krx_1d에 정리매매 시세가 있으면 그만큼은 반영된다.
 비용 (Costs, 모두 %)
@@ -123,10 +124,20 @@ def align_weights(w: pd.DataFrame, panel: Panel) -> pd.DataFrame:
     unknown = set(w.columns) - set(panel.close.columns)
     if unknown:
         raise ValueError(f"panel에 없는 종목: {sorted(unknown)[:5]}")
+    sig_dates = w.attrs.get("signal_dates")
     w = w.sort_index()
+    w.attrs = {}
     w = w[~w.index.duplicated(keep="last")]
+    if sig_dates is None:                       # 신호를 낸 날 = 값이 하나라도 있는 행
+        sig_dates = w.index[w.notna().any(axis=1).to_numpy()]
+    else:
+        sig_dates = pd.DatetimeIndex(sig_dates)
     w = w.reindex(panel.index.union(w.index)).ffill().reindex(panel.index)
-    return w.reindex(columns=panel.close.columns).fillna(0.0).astype(float)
+    out = w.reindex(columns=panel.close.columns).fillna(0.0).astype(float)
+    # 신호 날짜가 panel에 없으면(주말 등) 그 다음 봉을 신호 날로 본다
+    pos = np.unique(np.clip(panel.index.searchsorted(pd.DatetimeIndex(sig_dates)), 0, len(panel.index)))
+    out.attrs["signal_dates"] = tuple(panel.index[pos[pos < len(panel.index)]])   # 튜플: pandas가 attrs를 == 비교함
+    return out
 
 
 def monthly(index: pd.DatetimeIndex, amount: float, start=None, end=None) -> pd.Series:
@@ -169,10 +180,17 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
     whole_shares 정수 주식만 산다 (capital 또는 flows 필요). 살 때 수수료까지 감안해 내림, 1주 미만은 현금.
     rebalance    "always": 매 봉 목표 비중으로 되돌림 (가격 변동으로 흘러간 비중도 맞춤)
                  "on_change": 목표가 바뀐 종목, 적립금이 들어온 봉, 상장폐지 청산 때만 매매.
+                              바뀌지 않은 종목은 불어난 비중 그대로 두므로 비중 합이 1을 넘을 수 있다
+                              (소수점 모드에는 현금 검사가 없음 → 레버리지). 정수 주식 적립식용.
+                 "on_signal": 신호를 낸 봉(신호 표에 행이 있는 날, 같은 목표를 다시 내도 포함)이나 목표가
+                              하나라도 바뀐 봉, 적립금이 들어온 봉에 전 종목을 목표로 맞추고,
+                              그 사이에는 매매하지 않는다. 신호 표가 모든 봉에 행을 가지면(매일 계산하는 전략)
+                              목표가 바뀐 봉에만 맞춘다. 상장폐지는 그 종목만 청산하고 남은 돈은 다음 신호까지 현금.
+                              그 사이에는 매매하지 않는다. 월 리밸런싱 전략용.
     returns(시간가중)는 적립금 영향을 뺀 수익률이라 MDD·Sharpe는 그대로 의미가 있다."""
     if fill not in ("next_open", "next_close"):
         raise ValueError(f"fill: {fill}")
-    if rebalance not in ("always", "on_change"):
+    if rebalance not in ("always", "on_change", "on_signal"):
         raise ValueError(f"rebalance: {rebalance}")
     money = capital is not None or flows is not None
     if whole_shares and not money:
@@ -181,6 +199,9 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
     idx = panel.index
     o = panel.open.reindex(columns=w.columns).to_numpy(float)
     c = panel.close.reindex(columns=w.columns).to_numpy(float)
+    # 거래 가능 여부 (kr_stock: 거래량 > 0). 없으면 가격이 있는 날은 모두 거래 가능
+    tr = (panel["tradable"].reindex(columns=w.columns).fillna(False).to_numpy(bool)
+          if "tradable" in panel else np.ones_like(c, dtype=bool))
     W = w.to_numpy()
     n, k = c.shape
 
@@ -190,7 +211,9 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
     last_px = np.full(k, np.nan)
 
     lo = 0 if start is None else int(idx.searchsorted(pd.Timestamp(start)))
+    sig_on = idx.isin(pd.DatetimeIndex(w.attrs["signal_dates"])) if "signal_dates" in w.attrs else np.ones(len(idx), bool)       # 봉별: 전략이 신호를 낸 날인지
     hi = n if end is None else int(idx.searchsorted(pd.Timestamp(end)))
+    dense = bool(sig_on[max(lo, 1) - 1:max(hi - 1, 0)].all())   # 매 봉 신호 → 신호 날 기준은 의미 없음
     flow = np.zeros(n)
     if flows is not None and len(flows):
         pos = idx.searchsorted(pd.DatetimeIndex(flows.index))
@@ -224,12 +247,12 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         if fill == "next_open":
             px = o[t]
             g = np.nan_to_num(o[t] / prev_c - 1)            # 밤사이
-            trade_ok = ~np.isnan(o[t]) | dead
+            trade_ok = (~np.isnan(o[t]) & tr[t]) | dead
             seg2 = np.nan_to_num(c[t] / o[t] - 1)            # 장중
         else:
             px = c[t]
             g = np.nan_to_num(c[t] / prev_c - 1)
-            trade_ok = ~np.isnan(c[t]) | dead
+            trade_ok = (~np.isnan(c[t]) & tr[t]) | dead
             seg2 = np.zeros(k)
         g[dead] = 0.0
         px = np.where(np.isnan(px), last_px, px)            # 상장폐지 청산 가격
@@ -244,9 +267,12 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
             V += f
             inv += f
 
-        if rebalance == "on_change":
+        if rebalance != "always":
             prev_target = W[t - 2] if t >= 2 else np.zeros(k)
             changed = (np.abs(W[t - 1] - prev_target) > EPS) | dead | (last < t)
+            if rebalance == "on_signal":
+                fire = bool((np.abs(W[t - 1] - prev_target) > EPS).any()) or (sig_on[t - 1] and not dense)
+                changed = np.full(k, fire) | (last < t)          # 상장폐지 종목은 그것만 청산
             trade_ok = trade_ok & (changed | bool(f))
         new = np.where(trade_ok, target, h)
 
@@ -373,12 +399,14 @@ def walk_forward(strategy, panel: Panel, params: dict, costs: Costs, fill: str =
     if not wins:
         raise ValueError("워크포워드 창을 만들 수 없음 — 데이터 기간이 train+test보다 짧다")
     fit = getattr(strategy, "fit", None)
-    stitched, rows = [], []
+    stitched, rows, sig_dates = [], [], []
     for wdw in wins:
         (a, b), (c0, c1) = wdw["train"], wdw["test"]
         p = fit(panel.slice(a, b), dict(params)) if fit else params
         sig = align_weights(strategy.generate_signals(panel.slice(end=c1), p), panel.slice(end=c1))
         stitched.append(sig.loc[(sig.index >= c0) & (sig.index < c1)])
+        sd = pd.DatetimeIndex(sig.attrs["signal_dates"])
+        sig_dates.append(sd[(sd >= c0) & (sd < c1)])
         pb = panel.slice(end=b)
         tr = run(pb, strategy.generate_signals(pb, p), costs, fill, start=a,
                  **execution_kw(execution, pb.index, a, b))
@@ -390,6 +418,8 @@ def walk_forward(strategy, panel: Panel, params: dict, costs: Costs, fill: str =
     pre = align_weights(strategy.generate_signals(panel.slice(end=first_test), p0), panel.slice(end=first_test))
     w_all = pd.concat([pre.iloc[-1:]] + stitched)
     w_all = w_all[~w_all.index.duplicated(keep="last")]
+    pre_sd = pd.DatetimeIndex(pre.attrs["signal_dates"])
+    w_all.attrs["signal_dates"] = tuple(pre_sd[pre_sd >= pre.index[-1]].append(sig_dates).unique())
     last_end = wins[-1]["test"][1]
     test_res = run(panel, w_all, costs, fill, start=first_test, end=last_end,
                    **execution_kw(execution, panel.index, first_test, last_end))
