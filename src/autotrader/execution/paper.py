@@ -11,13 +11,13 @@ lab의 generate_signals()가 낸 목표 비중을 그대로 받아, 실제 주�
   2. mark    — 기업행위(분할·병합) 반영: 원본가 수익과 수정주가 수익이 다르면 보유 수량을 그 비율로 고친다.
                보유 종목 시세가 없으면 missed를 세고, risk.yaml 한도에 닿으면 마지막 가격에 가상 청산(측정 불가).
                종가로 평가해 자산·고점을 갱신한다.
-  3. decide  — 신호가 나온 봉이면 목표 비중을 주문으로 바꾼다. 리스크 한도는 여기서 적용한다:
-               kill_switch·일일 손실·최대 낙폭이면 매수 중단(매도는 허용), 종목 비중 상한,
-               보유 종목 수 상한, 1회 주문 금액 상한, 최소 주문 금액.
+  3. decide  — 신호가 나온 봉이면 목표 비중을 주문으로 바꾼다. risk.yaml의 계좌 보호 한도만 적용한다:
+               kill_switch·일일 손실·최대 낙폭이면 매수 중단(매도는 허용), 1회 주문 금액 상한, 최소 주문 금액,
+               비중 합 상한·음수 비중(버그 의심 → 그날 주문 전부 보류).
 
 주의
-- 비중 리밸런싱 주문은 손절가가 없어 risk.guards.make_plan(손절 기반 사이징)을 거치지 않는다.
-  같은 risk.yaml 값을 이 모듈에서 직접 적용한다. Order.plan_id에는 리밸런싱 id를 넣는다.
+- 비중형(type: portfolio) 전용. 종목 수·종목 비중은 전략이 정하고 백테스트에 들어간 그대로 따른다.
+  손절 기반 사이징(risk.guards.make_plan)은 신호형(type: trade) 전략 경로에서만 쓴다. Order.plan_id에는 리밸런싱 id.
 - 상장폐지는 미래를 모르므로 엔진처럼 "마지막 가격 다음 봉에 청산"할 수 없다 → 시세가 연속으로 없으면 정리.
 - 가격은 원본가(원화·달러 그대로)로 장부를 쓴다. kr_stock은 panel의 raw_close/close 비율로 원본 시가를 만든다.
 - 순수 함수다. 파일 저장·알림·데이터 읽기는 runner/paper.py가 한다.
@@ -236,25 +236,20 @@ def decide(book: Book, bar: Bar, target: pd.Series, costs: Costs, risk: dict, *,
     now = now or datetime.now(UTC)
     fee = costs.per_trade
     E = book.equity
-    p, o_cfg = risk["per_strategy"], risk["orders"]
+    o_cfg = risk["orders"]
     w = target[target.abs() > EPS].astype(float)
+    # 종목 수·종목 비중은 전략이 정한다 (백테스트에 들어간 그대로). 여기서는 버그로 보이는 비중만 막는다.
+    gross = float(w.sum())
+    bad = [] if np.isfinite(w).all() else ["비중에 NaN·무한대"]
     if (w < 0).any():
-        raise ValueError("paper 데스크는 아직 롱만 지원한다 (공매도 비중 있음)")
-
-    cap = p["max_position_pct"] / 100
-    if (w > cap + EPS).any():
-        ev.append({"kind": "risk_clip", "rule": "max_position_pct",
-                   "symbols": sorted(w[w > cap + EPS].index)[:20], "reason": f"종목 비중을 {cap:.0%}로 줄임"})
-        w = w.clip(upper=cap)
-
-    # 보유 종목 수 한도: 이미 들고 있는 종목 먼저, 나머지는 비중 큰 순
-    max_open = p["max_open_positions"]
-    order = sorted(w.index, key=lambda s: (s not in book.shares, -w[s], s))
-    if len(order) > max_open:
-        cut = order[max_open:]
-        ev.append({"kind": "risk_block", "rule": "max_open_positions", "symbols": cut,
-                   "reason": f"목표 {len(order)}종목 > 한도 {max_open} — 초과분 매수 안 함"})
-        w = w.drop(cut)
+        bad.append(f"음수 비중 {int((w < 0).sum())}종목 (paper 데스크는 롱만)")
+    if gross > o_cfg.get("max_gross_weight", 1.0) + 1e-6:
+        bad.append(f"비중 합 {gross:.4f} > 상한 {o_cfg.get('max_gross_weight', 1.0)}")
+    if bad:
+        book.pending = []
+        ev.append({"kind": "risk_block", "rule": "weights_invalid",
+                   "reason": "; ".join(bad) + " — 전략 버그 의심, 오늘 주문 전부 보류 (보유는 유지)"})
+        return ev
 
     blocked = buy_block(book, risk)
     max_val = o_cfg["max_order_value_krw"] / krw_per_unit

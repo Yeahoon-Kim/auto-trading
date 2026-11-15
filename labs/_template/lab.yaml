@@ -2,7 +2,23 @@ id: L000
 name: template
 version: 1               # 잠금 구간을 본 뒤 전략을 고치면 +1 하고 다시 검증
 status: draft            # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
-category: classic        # classic | intraday | algo | arbitrage | llm
+category: classic        # classic | intraday | algo | arbitrage | llm  (연구 분류)
+type: portfolio          # 실행 유형 (docs/architecture.md §10). 비우면 portfolio
+                         #   portfolio: generate_signals()가 날짜×종목 목표 비중을 낸다. 비중이 곧 사이징 (종목 수·비중은 전략이 정함)
+                         #   trade:     진입 신호(손절가 포함)를 내고 사이징·손절·당일 청산을 아래 trade 블록으로 (2단계, 아직 실행 안 됨)
+
+trade:                   # type: trade 일 때만. 비우면 config/risk.yaml trade.defaults, 상한(caps)은 넘을 수 없음
+  risk_per_trade_pct:    # 거래당 위험 (손절까지 잃는 돈 / 총자산 %)
+  max_heat_pct:          # 열린 포지션 전체 위험 합계 %
+  max_position_pct:      # 종목 하나 최대 비중 %
+  max_sector_pct:
+  max_open_positions:
+  kelly:                 # half | none
+
+paper:                   # 모의 운용 설정 (선택, autotrader.runner.paper)
+  capital:               # 비우면 execution.capital, 그것도 없으면 settings backtest.initial_capital_krw
+  limit_band_pct:        # 지정가 = 종가 ± 이 비율 (기본 5). 다음 날 시가가 밖이면 취소
+  krw_per_unit:          # 계좌 통화가 원화가 아니면 필수 (crypto_spot: USDT 1개 = 몇 원) — 주문 상한 환산용
 
 llm:                     # category: llm 일 때만
   model: ""              # 모델 ID (바꾸면 version +1)

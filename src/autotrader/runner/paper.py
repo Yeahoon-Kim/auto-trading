@@ -48,7 +48,9 @@ def lab_config(lab_dir: Path) -> dict:
 
 def options(cfg: dict) -> dict:
     """lab.yaml의 paper 블록(선택)과 시장 기본값을 합친다."""
-    m = cfg["market"]
+    m, kind = cfg["market"], cfg.get("type") or "portfolio"
+    if kind != "portfolio":
+        raise SystemExit(f"type: {kind} — paper 데스크는 아직 비중형(portfolio)만 돈다. 신호형(trade) 경로는 2단계")
     if m not in MARKETS:
         raise SystemExit(f"paper 데스크가 아직 지원하지 않는 시장: {m} (지원: {', '.join(MARKETS)})")
     p = {**MARKETS[m], "limit_band_pct": 5.0, "krw_per_unit": 1.0 if m == "kr_stock" else None,
@@ -217,7 +219,6 @@ def _no_limits(risk: dict) -> dict:
     """엔진과 같은 조건 비교용: 리스크 한도를 끈 사본 (risk.yaml은 그대로)."""
     r = json.loads(json.dumps(risk))
     r["global"].update(kill_switch=False, max_daily_loss_pct=1e9, max_drawdown_pct=1e9)
-    r["per_strategy"].update(max_position_pct=100.0, max_open_positions=10 ** 6)
     r["orders"].update(max_order_value_krw=1e18, min_notional_check=False, require_limit_orders=False)
     r["data_staleness"]["unmeasurable_retries"] = 10 ** 6
     return r

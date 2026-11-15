@@ -105,19 +105,37 @@ def test_missing_quotes_exit():
     assert sum(e["kind"] == "unmeasurable_exit" for e in ev) == 1
 
 
-def test_max_open_positions_and_kill_switch():
-    p = _panel({s: [100] * 5 for s in "ABC"})
-    w = pd.DataFrame({s: [1 / 3] for s in "ABC"}, index=p.index[:1])
-    risk = _free()
-    risk["per_strategy"]["max_open_positions"] = 2
-    book, ev = _run(p, w, risk=risk)
-    assert len(book.shares) == 2
-    assert any(e["kind"] == "risk_block" and e["rule"] == "max_open_positions" for e in ev)
+def test_strategy_shape_not_cut_by_risk_yaml():
+    """종목 수·종목 비중은 전략이 정한다 — risk.yaml 그대로 써도 20종목 × 5%, 3종목 × 33%가 그대로 들어간다."""
+    risk = load_config()
+    risk["orders"].update(max_order_value_krw=1e18, require_limit_orders=False)
+    syms = [f"S{i:02d}" for i in range(20)]
+    p = _panel({s: [100] * 3 for s in syms})
+    book, _ = _run(p, pd.DataFrame({s: [0.05] for s in syms}, index=p.index[:1]), risk=risk)
+    assert len(book.shares) == 20
+    p = _panel({s: [100] * 3 for s in "ABC"})
+    book, _ = _run(p, pd.DataFrame({s: [0.33] for s in "ABC"}, index=p.index[:1]), risk=risk)
+    assert all(q * 100 > 0.3 * 1_000_000 for q in book.shares.values())
 
-    # kill_switch: 매수는 막고 매도는 허용 (A 청산 + C 신규 → C만 막힘)
+
+def test_invalid_weights_hold_all_orders():
+    p = _panel({"A": [100] * 3, "B": [100] * 3})
+    book, ev = _run(p, pd.DataFrame({"A": [0.7], "B": [0.7]}, index=p.index[:1]))
+    assert not book.shares and not any(e["kind"] == "order" for e in ev)
+    assert any(e["kind"] == "risk_block" and e["rule"] == "weights_invalid" for e in ev)
+
+
+def test_kill_switch_blocks_buys_allows_sells():
+    p = _panel({s: [100] * 5 for s in "ABC"})
+    w = pd.DataFrame({"A": [0.5], "B": [0.5]}, index=p.index[:1])
+    risk = _free()
+    book, _ = _run(p, w, risk=risk)
+    assert set(book.shares) == {"A", "B"}
+
+    # A 청산 + C 신규 → 매도만 나가고 C는 막힘
     risk["global"]["kill_switch"] = True
     book.last_bar = str(p.index[3].date())
-    W = engine.align_weights(pd.DataFrame({"A": [0.0], "B": [1 / 3], "C": [1 / 3]}, index=p.index[4:5]), p)
+    W = engine.align_weights(pd.DataFrame({"A": [0.0], "B": [0.5], "C": [0.5]}, index=p.index[4:5]), p)
     ev = step(book, p, bars(p), W, 4, NO_COST, risk, rebalance="on_signal", **KW)
     assert [(e["symbol"], e["side"]) for e in ev if e["kind"] == "order"] == [("A", "sell")]
     assert any(e["kind"] == "risk_block" and e["rule"] == "buy_halt" and e["symbol"] == "C" for e in ev)

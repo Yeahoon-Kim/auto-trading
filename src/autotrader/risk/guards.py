@@ -4,7 +4,9 @@
 - data_staleness: 시세가 오래됐거나 없으면 신규 주문 차단. 보유 포지션 시세를 N회 연속 못 받으면 "측정 불가" → 정리 판정.
 - position_guard: 손절·목표가·장 마감 전 청산 판정 (전략과 독립적으로 리스크팀이 집행).
 - orders.min_notional_check: 주문 금액이 거래소 최소 주문 금액 미만이면 차단하고 사유를 남긴다.
-- make_plan: Signal → Plan. 위 가드와 sizing.size()를 거치며, 막히면 qty=0과 사유를 남긴다.
+- make_plan: 신호형(type: trade) 전략의 Signal → Plan. 위 가드와 sizing.size()를 거치며, 막히면 qty=0과 사유를 남긴다.
+  사이징 값은 lab.yaml trade 블록(trade_params). 비중형(type: portfolio)은 make_plan을 쓰지 않는다
+  (목표 비중이 곧 사이징 — execution/paper.py가 계좌 보호 한도만 적용).
 
 모두 순수 함수다. 현재 시각(now)·장 마감 시각·계좌 상태는 호출하는 쪽이 넘긴다.
 """
@@ -83,12 +85,34 @@ class Account:
     open_positions: int = 0
 
 
-def make_plan(signal: Signal, account: Account, now: datetime, cfg: dict, *,
+TRADE_KEYS = ("risk_per_trade_pct", "max_heat_pct", "max_position_pct", "max_sector_pct",
+              "max_open_positions", "kelly")
+
+
+def trade_params(lab_trade: dict | None, cfg: dict) -> dict:
+    """신호형 lab의 사이징 값 = risk.yaml trade.defaults 위에 lab.yaml trade 블록.
+    caps를 넘으면 거부한다 (lab은 더 엄하게만 정할 수 있다). 백테스트·paper·live가 같은 값을 쓴다."""
+    t = cfg["trade"]
+    lab_trade = {k: v for k, v in (lab_trade or {}).items() if v is not None}
+    unknown = set(lab_trade) - set(TRADE_KEYS)
+    if unknown:
+        raise ValueError(f"lab.yaml trade에 모르는 항목: {sorted(unknown)} (가능: {TRADE_KEYS})")
+    p = {**t["defaults"], **lab_trade}
+    for k, cap in (t.get("caps") or {}).items():
+        if p.get(k) is not None and p[k] > cap:
+            raise ValueError(f"lab.yaml trade.{k}={p[k]} > risk.yaml 상한 {cap}")
+    return p
+
+
+def make_plan(signal: Signal, account: Account, now: datetime, cfg: dict, *, trade: dict | None = None,
               lot: float = 1.0, multiplier: float = 1.0, min_notional: float = 0.0,
               win_rate: float | None = None, payoff: float | None = None) -> Plan:
-    """가드 순서: kill_switch → 데이터 신선도 → 보유 종목 수 → 사이징(가장 엄한 한도) → 최소 주문 금액.
+    """신호형(type: trade) 전략의 Signal → Plan.
+    trade: lab.yaml trade 블록 (없으면 risk.yaml trade.defaults). trade_params()로 합치고 상한을 검사한다.
+    가드 순서: kill_switch → 데이터 신선도 → 보유 종목 수 → 사이징(가장 엄한 한도) → 최소 주문 금액.
     첫 번째로 걸린 사유를 blocked에 남기고, 지나온 검사는 checks에 남긴다."""
     checks: list[str] = []
+    p = trade_params(trade, cfg)
 
     def plan(qty=0.0, sizing=None, blocked=None, stop=signal.stop) -> Plan:
         return Plan(signal_id=signal.id, lab=signal.lab, symbol=signal.symbol, market=signal.market,
@@ -104,7 +128,7 @@ def make_plan(signal: Signal, account: Account, now: datetime, cfg: dict, *,
         return plan(blocked=f"데이터 신선도: {why}")
     checks.append("data_staleness ok")
 
-    max_open = cfg["per_strategy"]["max_open_positions"]
+    max_open = p["max_open_positions"]
     if account.open_positions >= max_open:
         return plan(blocked=f"보유 종목 {account.open_positions} ≥ 한도 {max_open}")
     checks.append("max_open_positions ok")
@@ -116,17 +140,16 @@ def make_plan(signal: Signal, account: Account, now: datetime, cfg: dict, *,
     else:
         raise ValueError(f"계좌 통화 {account.currency}: krw_per_unit 없이는 주문 상한(원) 환산 불가")
 
-    s, p = cfg["sizing"], cfg["per_strategy"]
     check_min = cfg["orders"].get("min_notional_check", True)
     res = size(SizingInput(
         equity=account.equity, entry=signal.price, stop=signal.stop, atr=signal.atr,
-        risk_pct=s["risk_per_trade_pct"], side=signal.side, lot=lot, multiplier=multiplier,
-        max_position_pct=p["max_position_pct"], max_sector_pct=s["max_sector_pct"],
-        sector_exposure_pct=account.sector_exposure_pct, max_heat_pct=s["max_heat_pct"],
+        risk_pct=p["risk_per_trade_pct"], side=signal.side, lot=lot, multiplier=multiplier,
+        max_position_pct=p["max_position_pct"], max_sector_pct=p["max_sector_pct"],
+        sector_exposure_pct=account.sector_exposure_pct, max_heat_pct=p["max_heat_pct"],
         open_heat_pct=account.open_heat_pct, max_order_value=cfg["orders"]["max_order_value_krw"] / krw,
         # min_notional 차단은 sizing이 사유와 함께 낸다. 설정에서 끄면 0으로 넘겨 검사 생략
         min_notional=min_notional if check_min else 0.0,
-        win_rate=win_rate if s.get("kelly") == "half" else None, payoff=payoff))
+        win_rate=win_rate if p.get("kelly") == "half" else None, payoff=payoff))
     if res.blocked:
         return plan(sizing=res, blocked=f"사이징: {res.blocked}", stop=res.stop)
     checks.append(f"sizing ok (binding={res.binding})")
