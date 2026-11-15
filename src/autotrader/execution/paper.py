@@ -6,13 +6,16 @@ lab의 generate_signals()가 낸 목표 비중을 그대로 받아, 실제 주�
 그 차이는 tests/test_paper.py가 잰다 (risk.yaml live_gate.max_paper_vs_backtest_gap_pct와 같은 개념).
 
 봉 하나를 처리하는 순서 (step):
+  (1~2는 체결·평가, 3은 퇴출 감시, 4는 주문)
   1. settle  — 이전 봉에 낸 주문을 이 봉 시가에 체결 (매도 먼저, 현금 부족하면 큰 매수부터 줄임).
                거래정지·시가 없음·지정가 밖이면 취소한다 (엔진도 그날 못 사면 다음 신호까지 기다린다).
   2. mark    — 기업행위(분할·병합) 반영: 원본가 수익과 수정주가 수익이 다르면 보유 수량을 그 비율로 고친다.
                보유 종목 시세가 없으면 missed를 세고, risk.yaml 한도에 닿으면 마지막 가격에 가상 청산(측정 불가).
                종가로 평가해 자산·고점을 갱신한다.
-  3. decide  — 신호가 나온 봉이면 목표 비중을 주문으로 바꾼다. risk.yaml의 계좌 보호 한도만 적용한다:
-               kill_switch·일일 손실·최대 낙폭이면 매수 중단(매도는 허용), 1회 주문 금액 상한, 최소 주문 금액,
+  3. retire  — lab.yaml retirement(낙폭·연속 손실)에 걸리면 알림만 낸다. 매매는 백테스트와 같게 계속하고
+               퇴출은 사람이 status로 정한다 (전략 결과를 바꾸는 자동 차단은 두지 않는다).
+  4. decide  — 신호가 나온 봉이면 목표 비중을 주문으로 바꾼다. risk.yaml의 계좌 보호 한도만 적용한다:
+               kill_switch면 매수 중단(매도는 허용), 1회 주문 금액 상한, 최소 주문 금액,
                비중 합 상한·음수 비중(버그 의심 → 그날 주문 전부 보류).
 
 주의
@@ -50,7 +53,8 @@ class Book:
     equity: float = 0.0
     prev_equity: float = 0.0
     peak: float = 0.0
-    halted: str | None = None     # 최대 낙폭 도달 → 사람이 풀 때까지 매수 중단
+    losing_streak: int = 0        # 연속 손실 봉 수 (퇴출 조건 감시용)
+    retirement: list[str] = field(default_factory=list)   # 걸린 퇴출 조건 (처음 걸린 봉과 사유). 매매는 계속한다
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -211,21 +215,33 @@ def mark(book: Book, bar: Bar, prev_adj: pd.Series | None, costs: Costs, tax: fl
 
 def buy_block(book: Book, risk: dict) -> str | None:
     """신규 매수를 막을 사유. 매도(위험 축소)는 막지 않는다."""
-    g = risk["global"]
-    if g.get("kill_switch"):
+    if risk["global"].get("kill_switch"):
         return "kill_switch 켜짐"
-    if book.halted:
-        return book.halted
-    if book.prev_equity > 0:
-        day = (book.equity / book.prev_equity - 1) * 100
-        if day <= -g["max_daily_loss_pct"]:
-            return f"일일 손실 {day:.2f}% ≤ -{g['max_daily_loss_pct']}%"
-    if book.peak > 0:
-        dd = (book.equity / book.peak - 1) * 100
-        if dd <= -g["max_drawdown_pct"]:
-            book.halted = f"최대 낙폭 {dd:.2f}% ≤ -{g['max_drawdown_pct']}% — 사람이 확인 후 halted를 풀 때까지 매수 중단"
-            return book.halted
     return None
+
+
+def check_retirement(book: Book, rules: dict | None, bar_date) -> list[dict]:
+    """lab.yaml retirement 감시. 걸리면 알림 이벤트만 낸다 — 매매는 백테스트와 같게 계속하고,
+    퇴출(status: retired)은 사람이 정한다. 같은 조건은 처음 걸린 한 번만 알린다."""
+    rules = {k: v for k, v in (rules or {}).items() if v not in (None, "")}
+    if book.prev_equity > 0:
+        book.losing_streak = book.losing_streak + 1 if book.equity < book.prev_equity - EPS else 0
+    hits = []
+    if rules.get("max_drawdown_pct") is not None and book.peak > 0:
+        dd = (book.equity / book.peak - 1) * 100
+        if dd <= -float(rules["max_drawdown_pct"]):
+            hits.append(("max_drawdown_pct", f"낙폭 {dd:.2f}% ≤ -{rules['max_drawdown_pct']}%"))
+    if rules.get("max_losing_days") is not None and book.losing_streak >= int(rules["max_losing_days"]):
+        hits.append(("max_losing_days", f"연속 손실 {book.losing_streak}봉 ≥ {rules['max_losing_days']}"))
+    ev = []
+    seen = {r.split(":")[0] for r in book.retirement}
+    for rule, why in hits:
+        if rule in seen:
+            continue
+        book.retirement.append(f"{rule}: {pd.Timestamp(bar_date).date()} {why}")
+        ev.append({"kind": "retirement", "rule": rule,
+                   "reason": f"{why} — 퇴출 조건. 매매는 계속하며, 퇴출 여부는 사람이 정한다 (lab.yaml status)"})
+    return ev
 
 
 def decide(book: Book, bar: Bar, target: pd.Series, costs: Costs, risk: dict, *, lab: str, market: str,
@@ -324,8 +340,9 @@ def should_fire(W: pd.DataFrame, i: int, rebalance: str, first: bool = False, en
 def step(book: Book, panel, raw: tuple, W: pd.DataFrame, i: int, costs: Costs, risk: dict, *,
          lab: str, market: str, rebalance: str, lot: float = 1.0, min_notional: float = 0.0,
          krw_per_unit: float = 1.0, limit_band_pct: float | None = 5.0, enter_now: bool = False,
-         now: datetime | None = None) -> list[dict]:
-    """봉 i 하나: 체결 → 평가 → (신호면) 주문. 같은 봉을 두 번 처리하지 않는다."""
+         retirement: dict | None = None, now: datetime | None = None) -> list[dict]:
+    """봉 i 하나: 체결 → 평가 → 퇴출 조건 감시 → (신호면) 주문. 같은 봉을 두 번 처리하지 않는다.
+    retirement: lab.yaml retirement 블록 (max_drawdown_pct, max_losing_days)."""
     date = panel.index[i]
     if book.last_bar is not None and pd.Timestamp(book.last_bar) >= date:
         return [{"kind": "skip_bar", "bar": str(date.date()), "reason": "이미 처리한 봉"}]
@@ -340,6 +357,7 @@ def step(book: Book, panel, raw: tuple, W: pd.DataFrame, i: int, costs: Costs, r
     if first:
         book.peak = max(book.peak, book.equity)
         book.prev_equity = book.equity
+    ev += check_retirement(book, retirement, date)
     if should_fire(W, i, rebalance, first, enter_now):
         ev += decide(book, bar, W.iloc[i], costs, risk, lab=lab, market=market, lot=lot,
                      min_notional=min_notional, krw_per_unit=krw_per_unit,

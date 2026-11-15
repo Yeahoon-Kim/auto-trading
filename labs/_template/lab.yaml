@@ -63,7 +63,8 @@ params: {}               # 전략 파라미터
 
 benchmark: ""            # SPY_tr_wht 등 benchmark.py 변형, 또는 universe 안의 종목 (매수 후 보유)
 
-retirement:              # 전략별 퇴출 조건 (live 단계에서 감시)
+retirement:              # 전략별 퇴출 조건. paper·live 상태면 max_drawdown_pct나 max_losing_days 중 하나 필수.
+                         # paper 데스크가 매 봉 감시하고, 걸리면 텔레그램으로 알린다 (매매는 그대로 — 퇴출은 사람이 status로)
   max_drawdown_pct:      # 예: 개발 구간 MDD × 1.5
   max_losing_days:       # 예: 연속 손실 일수
   custom: ""             # 그 밖의 조건 (예: 펀딩비가 N일 연속 음수)

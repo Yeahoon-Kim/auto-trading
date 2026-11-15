@@ -59,6 +59,7 @@ def options(cfg: dict) -> dict:
         raise SystemExit(f"{m}: lab.yaml paper.krw_per_unit (계좌 통화 1단위 = 몇 원)이 필요하다 — 주문 상한 환산용")
     s = yaml.safe_load((store.ROOT / "config" / "settings.yaml").read_text(encoding="utf-8"))
     p.setdefault("capital", (cfg.get("execution") or {}).get("capital") or s["backtest"]["initial_capital_krw"])
+    p["retirement"] = {k: v for k, v in (cfg.get("retirement") or {}).items() if v not in (None, "")}
     return p
 
 
@@ -115,14 +116,14 @@ def summarize(lab: str, ev: list[dict], book: Book) -> str:
     lines = [f"📒 paper {lab} — {book.last_bar}",
              f"자산 {book.equity:,.0f} · 현금 {book.cash:,.0f} · 보유 {len(book.shares)}종목 · 대기 주문 {len(book.pending)}",
              f"체결 {k.get('fill', 0)} · 새 주문 {k.get('order', 0)} · 취소 {k.get('cancel', 0)}"]
-    alerts = [e for e in ev if e["kind"] in ("corporate_action", "unmeasurable_exit", "reduce")
-              or (e["kind"] == "risk_block")]
+    for e in ev:
+        if e["kind"] == "retirement":
+            lines.append(f"⛔ 퇴출 조건: {e['reason']}")
+    alerts = [e for e in ev if e["kind"] in ("corporate_action", "unmeasurable_exit", "reduce", "risk_block")]
     for e in alerts[:8]:
         lines.append(f"⚠️ {e['kind']} {e.get('symbol', e.get('symbols', ''))}: {e.get('reason', '')}")
     if len(alerts) > 8:
         lines.append(f"… 외 {len(alerts) - 8}건 (events.jsonl)")
-    if book.halted:
-        lines.append(f"⛔ {book.halted}")
     return "\n".join(lines)
 
 
@@ -153,6 +154,10 @@ def run_today(lab_dir: Path, *, allow_unvalidated=False, dry_run=False, notify=T
         raise SystemExit(f"{lab}: status={cfg.get('status')} — 검증된 lab만 paper로 돈다 "
                          "(배관 점검이면 --allow-unvalidated)")
     opt = options(cfg)
+    numeric = {k for k in ("max_drawdown_pct", "max_losing_days") if k in opt["retirement"]}
+    if cfg.get("status") in RUNNABLE and not numeric:
+        raise SystemExit(f"{lab}: lab.yaml retirement에 max_drawdown_pct나 max_losing_days가 없다 — "
+                         "모의·실전 운용 전에 퇴출 조건을 정한다 (예: 개발 구간 MDD × 1.5)")
     panel = load_panel(cfg, today)
     last = panel.index[-1]
     now = pd.Timestamp(today) if today is not None else pd.Timestamp.now()
@@ -177,7 +182,7 @@ def run_today(lab_dir: Path, *, allow_unvalidated=False, dry_run=False, notify=T
     W = signals(lab_dir, cfg, panel)
     costs = engine.Costs.from_config(cfg["market"], cfg.get("costs"))
     rebalance = (cfg.get("execution") or {}).get("rebalance") or "always"
-    kw = {k: opt[k] for k in ("lot", "min_notional", "krw_per_unit", "limit_band_pct")}
+    kw = {k: opt[k] for k in ("lot", "min_notional", "krw_per_unit", "limit_band_pct", "retirement")}
     book, ev = replay(panel, W, start_i, opt["capital"], costs, load_config(), lab=lab, market=cfg["market"],
                       rebalance=rebalance, book=book, enter_now=enter_now, **kw)
     n = len(panel.index) - start_i
@@ -204,7 +209,7 @@ def run_replay(lab_dir: Path, days: int, today=None) -> dict:
     costs = engine.Costs.from_config(cfg["market"], cfg.get("costs"))
     rebalance = (cfg.get("execution") or {}).get("rebalance") or "always"
     start_i = max(1, len(panel.index) - days)
-    kw = {k: opt[k] for k in ("lot", "min_notional", "krw_per_unit", "limit_band_pct")}
+    kw = {k: opt[k] for k in ("lot", "min_notional", "krw_per_unit", "limit_band_pct", "retirement")}
     out = {}
     for name, risk in (("risk.yaml", load_config()), ("한도 없음", _no_limits(load_config()))):
         book, ev = replay(panel, W, start_i, opt["capital"], costs, risk, lab=lab, market=cfg["market"],
@@ -218,7 +223,7 @@ def run_replay(lab_dir: Path, days: int, today=None) -> dict:
 def _no_limits(risk: dict) -> dict:
     """엔진과 같은 조건 비교용: 리스크 한도를 끈 사본 (risk.yaml은 그대로)."""
     r = json.loads(json.dumps(risk))
-    r["global"].update(kill_switch=False, max_daily_loss_pct=1e9, max_drawdown_pct=1e9)
+    r["global"].update(kill_switch=False)
     r["orders"].update(max_order_value_krw=1e18, min_notional_check=False, require_limit_orders=False)
     r["data_staleness"]["unmeasurable_retries"] = 10 ** 6
     return r

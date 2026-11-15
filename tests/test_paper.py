@@ -173,3 +173,26 @@ def test_matches_engine_within_gap(rebalance):
     cmp = compare_engine(p, W, 0, cap, COST, rebalance, eq)
     assert cmp["bars"] > 200
     assert cmp["max_abs_gap_pct"] < 1.0, cmp
+
+
+def test_retirement_alerts_once_and_keeps_trading():
+    # 100 → 70 (낙폭 30%) 뒤에도 다음 신호에 정상 매수
+    p = _panel({"A": [100, 100, 90, 80, 70, 70, 70], "B": [100] * 7})
+    w = pd.DataFrame({"A": [1.0, 0.0], "B": [0.0, 1.0]}, index=p.index[[0, 5]])
+    book, ev = _run(p, w, retirement={"max_drawdown_pct": 15, "max_losing_days": 3})
+    ret = [e for e in ev if e["kind"] == "retirement"]
+    assert [(e["rule"], e["bar"]) for e in ret] == [                                  # 각각 한 번만
+        ("max_drawdown_pct", str(p.index[3].date())),                                 # 80: 낙폭 20% ≥ 15%
+        ("max_losing_days", str(p.index[4].date()))]                                  # 90·80·70: 3봉 연속
+    assert "B" in book.shares and "A" not in book.shares                             # 매매는 계속
+    assert len(book.retirement) == 2
+
+
+def test_paper_status_requires_retirement(tmp_path):
+    from autotrader.runner.paper import run_today
+    lab = tmp_path / "L999-x"
+    lab.mkdir()
+    (lab / "lab.yaml").write_text("id: L999\nstatus: paper\nmarket: kr_stock\nretirement: {custom: ''}\n",
+                                  encoding="utf-8")
+    with pytest.raises(SystemExit, match="퇴출 조건"):
+        run_today(lab, dry_run=True, notify=False)

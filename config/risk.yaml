@@ -8,9 +8,8 @@
 #   비중형(type: portfolio)은 목표 비중이 곧 사이징이라 이 블록을 쓰지 않는다.
 
 global:
-  kill_switch: false            # true면 신규 매수 전면 중단 (위험을 줄이는 매도는 허용)
-  max_daily_loss_pct: 2.0       # 일일 손실이 총자산의 2% 넘으면 당일 신규 매수 중단
-  max_drawdown_pct: 10.0        # 고점 대비 10% 하락 시 신규 매수 중단 + 알림 (사람이 풀 때까지)
+  kill_switch: false            # true면 신규 매수 전면 중단 (위험을 줄이는 매도는 허용). 사람이 켜고 끈다
+  # 낙폭·연속 손실 기준은 전략마다 다르므로 여기 두지 않는다 → lab.yaml retirement (전략 결과를 바꾸지 않고 퇴출 후보로 알림)
 
 trade:
   defaults:                     # lab.yaml trade 블록에 없는 값
