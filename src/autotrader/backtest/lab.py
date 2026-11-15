@@ -186,7 +186,7 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
         "windows": win_rows, "sensitivity": sens, "causality": causal,
         "benchmark": _bench(cfg, panel, test.returns.index, costs),
         "regimes": _regimes(panel, test.returns, year) if panel.timeframe.endswith("d") else None,
-        "checks": checks,
+        "checks": checks, "trials": _trials(cfg),
     }
     out = lab_dir / "results" / datetime.now().strftime("%Y%m%d-%H%M%S")
     engine.save_result(test, out, "test")
@@ -225,6 +225,7 @@ def open_lockbox(lab_dir: Path) -> dict:
                "costs": engine.asdict(costs), "data": panel.meta, "test": _clean(m),
                "execution": ex, "money": _clean(res.money()),
                "dev_result": str(last[-1].parent.name), "dev_mdd": dev_mdd,
+               "trials": _trials(cfg),
                "checks": [{"no": 6, "rule": "잠금 구간 수익 ≥ 0, MDD ≤ 개발 구간 MDD × 1.5",
                            "value": f"수익 {m['total_return']:.2%}, MDD {m['mdd']:.2%} (개발 {dev_mdd:.2%})",
                            "pass": ok}]}
@@ -248,6 +249,14 @@ def _mark_lockbox(path: Path, start: str, end: str) -> None:
         blk = re.sub(r"(^\s+opened:\s*)\S*", r"\g<1>true", blk, flags=re.MULTILINE)
         s = s[:m.start()] + blk + s[m.end():]
     path.write_text(s, encoding="utf-8")
+
+
+def _trials(cfg: dict) -> dict:
+    """lab.yaml의 trials 블록 요약 (없거나 비어 있어도 됨). 판정은 validator가 한다."""
+    t = cfg.get("trials") or {}
+    ex = t.get("exposed_from") or []
+    return {"count": t.get("count"), "exposed_from": [ex] if isinstance(ex, str) else list(ex),
+            "log_entries": len(t.get("log") or [])}
 
 
 def _clean(d: dict) -> dict:
@@ -283,6 +292,11 @@ def report(s: dict) -> str:
              f"매도세 {_tax(s['costs']['tax_pct_sell'])}",
              f"- 데이터: {s['data'].get('source')}  ·  생존편향: {s['data'].get('survivorship')}",
              ]
+    tr = s.get("trials") or {}
+    if tr:
+        lines.append(f"- 시도 횟수: {tr.get('count') if tr.get('count') is not None else '미기록'}"
+                     + (f"  ·  출처 lab(이미 본 개발 구간): {', '.join(map(str, tr['exposed_from']))}"
+                        if tr.get("exposed_from") else ""))
     j = s["data"].get("jumps") or {}
     if j.get("neutralized"):
         lines.append(f"- 가격제한(±35%) 초과 하루 변동 {j['neutralized']:,}건({j['symbols']}종목)을 수익 0으로 처리 "
