@@ -1,7 +1,7 @@
 """운영팀 일일 마감 보고 (매일 23:00).
 
 사실은 전부 코드가 모은다 — 수집 상태, 신선도 점검, 수집 로그 ERROR, LLM 호출 실패율, 스캐너 결과,
-LLM 판단 채점 현황, 데이터 용량 증가. LLM(ops-reporter, 빠른 모델)은 그 사실 표를 10줄 안팎으로
+LLM 판단 채점 현황, 데이터 용량 증가, 리서치 진행 상태(labs/). LLM(ops-reporter, 빠른 모델)은 그 사실 표를 10줄 안팎으로
 요약만 한다. LLM이 실패하면 사실 표만 보낸다.
 
     uv run python -m autotrader.monitoring.daily_report [--notify] [--no-llm] [--date YYYY-MM-DD]
@@ -18,6 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 from ..data import store
 from ..llm import claude_cli, decision_log
@@ -26,13 +27,15 @@ ROOT = Path(__file__).resolve().parents[3]
 LOG_DIR = ROOT / "logs"
 SCAN_DIR = ROOT / "reports" / "scan"
 REPORT_DIR = ROOT / "reports" / "ops"
+LABS_DIR = ROOT / "labs"
 TZ = "Asia/Seoul"
 
 SYSTEM = """너는 헤지펀드 운영팀(ops-reporter)이다. 아래 '사실 표'만 보고 일일 마감 보고를 쓴다.
 - 숫자는 표에서 그대로 옮긴다. 표에 없는 숫자를 만들지 않는다. 추정하면 "추정"이라고 쓴다.
 - 백필완료가 "-"인 데이터셋은 파생 표·신선도 점검 비대상이므로 백필 문제로 보지 않는다.
 - 문제는 숨기지 않고 맨 위에 쓴다. 문제가 없으면 "문제 없음"이라고 쓴다.
-- 형식(순서 고정): 문제 → 데이터 상태 → 전략·판단 기록 → 다음 할 일. 전체 10줄 안팎(최대 12줄), 한 줄에 한 사실, 한국어.
+- 리서치 진행 상태의 판정 대기(validator 의견서 없음 / 사용자 판정 대기)는 '다음 할 일'에 lab id와 함께 쓴다.
+- 형식(순서 고정): 문제 → 데이터 상태 → 전략·판단 기록(리서치 진행 포함) → 다음 할 일. 전체 10줄 안팎(최대 12줄), 한 줄에 한 사실, 한국어.
 - 주문·설정 변경을 권하지 않는다. 매수·매도 의견을 내지 않는다."""
 
 # 로그 메시지에 섞일 수 있는 키·토큰 가리기 (URL 쿼리의 key=..., 20자 이상 영숫자 덩어리)
@@ -146,12 +149,61 @@ def _save_sizes(day: str, now: dict[str, int]) -> None:
     (REPORT_DIR / "sizes.json").write_text(json.dumps(hist, indent=1), encoding="utf-8")
 
 
+# 판정 전 단계: 이 상태에서 의견서 유무로 누가 할 차례인지 보인다
+_PRE_VERDICT = {"backtesting", "validating"}
+
+
+def _labs() -> list[dict]:
+    """labs/L*/lab.yaml 마다 id·name·version·status, 판정 대기, 마지막 결과 실행 시각."""
+    out = []
+    for d in sorted(LABS_DIR.glob("L*")):
+        y = d / "lab.yaml"
+        if not d.is_dir() or not y.exists():
+            continue
+        try:
+            meta = yaml.safe_load(y.read_text(encoding="utf-8")) or {}
+        except Exception as e:  # noqa: BLE001
+            out.append({"dir": d.name, "error": f"{type(e).__name__}: {e}"[:120]})
+            continue
+        status = str(meta.get("status") or "-")
+        if status in _PRE_VERDICT:
+            waiting = "사용자 판정 대기" if (d / "validation.md").exists() else "validator 의견서 없음"
+        else:
+            waiting = "-"
+        res = d / "results"
+        runs = sorted(p.name for p in res.iterdir() if p.is_dir()) if res.is_dir() else []
+        out.append({"dir": d.name, "id": meta.get("id") or d.name, "name": meta.get("name") or "-",
+                    "version": meta.get("version"), "status": status, "waiting": waiting,
+                    "last_run": runs[-1] if runs else None})
+    return out
+
+
+def _backlog() -> int | None:
+    """labs/BACKLOG.md '## 후보' 표의 데이터 행 수. 파일이 없으면 None."""
+    p = LABS_DIR / "BACKLOG.md"
+    if not p.exists():
+        return None
+    n, in_sec, seen_head = 0, False, False
+    for line in p.read_text(encoding="utf-8").splitlines():
+        t = line.strip()
+        if t.startswith("## "):
+            in_sec, seen_head = t[3:].strip() == "후보", False
+            continue
+        if not in_sec or not t.startswith("|"):
+            continue
+        if not seen_head:  # 첫 줄은 머리글
+            seen_head = True
+        elif not re.fullmatch(r"\|[\s:|-]+\|", t):  # 구분선 제외
+            n += 1
+    return n
+
+
 def collect(day: str | None = None) -> dict:
     day = day or _today()
     sizes = _sizes()
     return {"day": day, "status": _collect_status(), "health": _health(), "log": _collect_log(day),
             "llm": _llm_calls(day), "scan": _scan(day), "decisions": _decisions(),
-            "sizes": sizes, "growth": _size_growth(day, sizes)}
+            "sizes": sizes, "growth": _size_growth(day, sizes), "labs": _labs(), "backlog": _backlog()}
 
 
 # ── 표·보고서 ────────────────────────────────────────────────────────────────
@@ -203,6 +255,20 @@ def table(f: dict) -> str:
           + (f", {g['since']} 대비 {_mb(g['delta'])}" if g["since"] else " (비교 기준 없음 — 첫 기록)")]
     if g["top"]:
         L.append("- 증가 상위: " + ", ".join(f"{k} {_mb(v)}" for k, v in g["top"]))
+    L += ["", "## 리서치 진행 상태 (labs/)"]
+    labs = f.get("labs") or []
+    if labs:
+        L.append("lab | 이름 | 버전 | 상태 | 판정 대기 | 마지막 결과")
+        for r in labs:
+            if "error" in r:
+                L.append(f"{r['dir']} | lab.yaml 읽기 실패: {r['error']}")
+                continue
+            ver = "-" if r["version"] is None else f"v{r['version']}"
+            L.append(f"{r['id']} | {r['name']} | {ver} | {r['status']} | {r['waiting']} | {r['last_run'] or '결과 없음'}")
+    else:
+        L.append("- lab 없음")
+    if f.get("backlog") is not None:
+        L.append(f"- 대기열 후보 (labs/BACKLOG.md): {f['backlog']}건")
     return "\n".join(L)
 
 
