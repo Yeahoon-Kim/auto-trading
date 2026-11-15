@@ -147,13 +147,13 @@ LLM 에이전트는 **판단·해석·검토**만 맡고, 숫자 계산과 주�
 |---|---|---|---|---|
 | 1 | 수집·시스템 상태 감시와 텔레그램 알림. 실패를 숨기지 않는다 | Grok 팀 | `monitoring/health.py`, `monitoring/notify.py`, 스케줄러 | ✅ (텔레그램 토큰 대기) |
 | 2 | 시세 외 데이터: 거시(금리·환율·VIX·신용스프레드), 코인 심리(공포탐욕, 미결제약정), 공시·뉴스 | day-trader-skill, TradingAgents | `data/collectors/macro.py`, `binance.collect_positioning` | ✅ 거시·코인 심리 / 🔧 공시·뉴스(키 필요) |
-| 3 | 데이터가 오래되면 신규 주문 중단, 측정 불가 포지션은 정리 | Grok 팀 | `risk.yaml` `data_staleness` | 📝 |
-| 4 | 역할 간 인수인계 스키마 (signal → plan → order → fill) | day-trader-skill | 운용데스크 구현 시 `core/schemas.py` | 📝 |
-| 5 | 보유 포지션 보호: 손절·목표가·장 마감 전 청산 감시 | day-trader-skill | `risk.yaml` `position_guard`, 리스크팀 | 📝 |
+| 3 | 데이터가 오래되면 신규 주문 중단, 측정 불가 포지션은 정리 | Grok 팀 | `risk.yaml` `data_staleness`, `risk/guards.py` `check_staleness`·`is_unmeasurable` | ✅ 판정 (주문 경로 연결은 운용데스크 구현 때) |
+| 4 | 역할 간 인수인계 스키마 (signal → plan → order → fill) | day-trader-skill | `core/schemas.py` (Signal·Plan·Order·Fill·Position, UTC 강제, id 승계), `risk/guards.py` `make_plan`·`plan_to_order` | ✅ |
+| 5 | 보유 포지션 보호: 손절·목표가·장 마감 전 청산 감시 | day-trader-skill | `risk.yaml` `position_guard`, `risk/guards.py` `check_position` | ✅ 판정 (감시 루프·청산 주문은 운용데스크 구현 때) |
 | 6 | 실전 초기 주문별 텔레그램 승인 모드 | day-trader-skill | `risk.yaml` `approval` | 📝 |
-| 7 | 최소 주문 금액 검사 (소액에서 주문이 0이 되는 문제) | Grok 팀 | `risk.yaml` `orders.min_notional_check` | 📝 |
+| 7 | 최소 주문 금액 검사 (소액에서 주문이 0이 되는 문제) | Grok 팀 | `risk.yaml` `orders.min_notional_check`, `risk/guards.py` `check_min_notional`·`make_plan` | ✅ |
 | 8 | LLM 판단의 애널리스트 분업·토론·모델 분리 | TradingAgents | 7절 | 📝 |
-| 9 | 오프라인 테스트 (샘플 데이터로 네트워크 없이) | day-trader-skill | `tests/test_core.py` | ✅ 핵심 로직 13개 |
+| 9 | 오프라인 테스트 (샘플 데이터로 네트워크 없이) | day-trader-skill | `tests/test_core.py`, `tests/test_risk.py` | ✅ 핵심 로직 13개 + 리스크 계층 10개 |
 | 10 | 진입 직전 과거 유사 사례 확인 (선택) | day-trader-skill | `backtest/replay.py` | ✅ |
 | 11 | 장 전 스캐너 (셋업 규칙 + 유동성 필터) | trader-scanner | `intel/scanner.py`, 08:00 브리핑 | ✅ |
 | 12 | 포지션 사이징 (가장 엄한 한도, 내림, 하프 Kelly, heat) | position-sizer | `risk/sizing.py`, `risk.yaml` `sizing` | ✅ (주문 경로 연결은 운용데스크 구현 때) |
