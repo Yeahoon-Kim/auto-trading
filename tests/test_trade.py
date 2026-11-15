@@ -351,3 +351,44 @@ def test_matches_replay_history_on_random_sessions():
     assert [kind[k] for k in tl["exit_kind"]] == hist["outcome"].tolist()
     assert tl["r"].to_numpy() == pytest.approx(hist["r"].to_numpy(), abs=1e-9)
     assert (hist["outcome"] == "stop").sum() > 30 and (hist["outcome"] == "target").sum() > 30
+
+
+# ── 1분봉: 장 마감 N분 전 청산 (risk.yaml flat_before_close_min, us_stock 10분) ──
+def _minutes(sessions: list[tuple[str, str, dict]], symbols=("A",)) -> Panel:
+    """sessions: [(첫 봉 시각 UTC, 마지막 봉 시각 UTC, {봉 시각: (o, h, l, c)} 덮어쓸 봉)]. 나머지 봉은 100 평평."""
+    idx, rows = [], []
+    for first, last, over in sessions:
+        for ts in pd.date_range(first, last, freq="1min"):
+            idx.append(ts)
+            rows.append(over.get(ts.strftime("%H:%M"), FLAT))
+    f = {k: pd.DataFrame({s: [r[i] for r in rows] for s in symbols}, index=pd.DatetimeIndex(idx), dtype=float)
+         for i, k in enumerate(("open", "high", "low", "close"))}
+    return Panel(f, "us_stock", timeframe="1m")
+
+
+def test_minute_bars_flatten_n_minutes_before_close():
+    # 마감 21:00 → 20:49 봉(끝 20:50, 남은 10분)에서 정리. 20:55 폭락은 이미 청산 뒤라 무관
+    p = _minutes([("2020-01-02 20:00", "2020-01-02 20:59", {"20:49": (100, 101, 99, 100.7),
+                                                           "20:55": (100, 100, 80, 81)}),
+                  ("2020-01-03 20:00", "2020-01-03 20:59", {})])
+    t = _only(_run(p, [_sig(p, 0, intraday=True)]))
+    assert t["exit_kind"] == "flat_before_close"
+    assert t["exit_ts"] == pd.Timestamp("2020-01-02 20:49") and t["exit"] == 100.7
+    assert "10분 전" in t["exit_reason"]
+
+
+def test_minute_bars_stop_before_flat_window_wins():
+    p = _minutes([("2020-01-02 20:00", "2020-01-02 20:59", {"20:30": (100, 100, 94, 95)})])
+    t = _only(_run(p, [_sig(p, 0, intraday=True)]))
+    assert t["exit_kind"] == "stop_loss" and t["exit_ts"] == pd.Timestamp("2020-01-02 20:30")
+
+
+def test_minute_bars_early_close_day_and_overnight_position():
+    # 반일장: 그날 마지막 봉이 17:59 → 마감 18:00으로 보고 17:49 봉에서 정리. 당일 청산이 아닌 포지션은 넘어간다
+    p = _minutes([("2020-01-02 17:00", "2020-01-02 17:59", {}),
+                  ("2020-01-03 20:00", "2020-01-03 20:59", {})], symbols=("A", "B"))
+    res = _run(p, [_sig(p, 0, intraday=True), {**_sig(p, 0), "symbol": "B"}])
+    tl = res.meta["trade_log"].set_index("symbol")
+    assert tl.loc["A", "exit_kind"] == "flat_before_close"
+    assert tl.loc["A", "exit_ts"] == pd.Timestamp("2020-01-02 17:49")
+    assert tl.loc["B", "exit_kind"] == "open"

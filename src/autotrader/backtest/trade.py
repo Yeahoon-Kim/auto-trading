@@ -22,11 +22,13 @@ lab의 strategy.py는 generate_trades(data, params)로 '봉 t 종가까지 보�
 - 보유 봉마다 순서: ① 시가 — 시가가 이미 손절/목표 너머면 시가에 청산 (갭은 손절가보다 나쁘게 체결)
   ② 불리한 극값(롱 저가, 숏 고가)으로 손절 판정 → 손절가에 청산
   ③ 유리한 극값(롱 고가, 숏 저가)으로 목표가 판정 → 목표가에 청산
-  ④ 당일 청산(intraday) 포지션이면 그날 마지막 봉 종가에 장 마감 전 정리 판정 → 종가에 청산
+  ④ 당일 청산(intraday) 포지션이면 봉 끝 시각으로 장 마감 전 정리 판정 → 그 봉 종가에 청산
+     (장 마감 시각 = 그날 데이터 마지막 봉의 끝. 분봉이면 마감 N분 전 봉에서, 일봉이면 그날 종가에)
   **같은 봉에서 손절과 목표가가 둘 다 닿으면 손절로 친다** (봉 안의 순서를 모르므로).
 - 지정가가 장중에 체결된 봉에서는 목표가를 인정하지 않는다 (체결 전에 고가가 나왔을 수 있음). 손절은 인정.
 - 장 마감 전 정리는 risk.yaml position_guard.flat_before_close_min이 있는 시장만 (kr_stock·us_stock).
-  일봉에서는 "마감 N분 전"을 종가로 근사한다. 24시간 시장(코인)은 데스크처럼 정리하지 않는다.
+  일봉에서는 "마감 N분 전" 가격이 없어 종가로 근사한다 (KR은 마감 동시호가 가격이라 실제와 다를 수 있음).
+  반일장처럼 일찍 끝난 날은 그날 마지막 봉 시각을 마감으로 본다. 24시간 시장(코인)은 데스크처럼 정리하지 않는다.
 - 상장폐지(마지막 가격 이후 데이터 없음): 다음 봉에 마지막 종가로 강제 청산. 가격이 빈 봉은 판정 보류.
 - 같은 종목을 이미 보유(또는 체결 대기)하면 새 신호는 버린다.
 
@@ -124,7 +126,7 @@ def normalize(trades, panel: Panel) -> pd.DataFrame:
     pos = panel.index.searchsorted(ts)       # 휴장일 신호는 다음 봉을 판단 봉으로
     df = df[pos < len(panel.index)].copy()
     df["ts"] = panel.index[pos[pos < len(panel.index)]]
-    df["intraday"] = df["intraday"].fillna(False).astype(bool)
+    df["intraday"] = [bool(v) if pd.notna(v) else False for v in df["intraday"]]
     df["reason"] = df["reason"].fillna("").astype(str)
     for c in ("stop", "atr", "target", "entry"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -170,6 +172,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
     fee = costs.per_trade
     blen = _bar_len(panel)
     day = idx.normalize()
+    day_last = day.searchsorted(day, side="right") - 1   # 봉마다 그날 마지막 봉 위치
     sig_pos = idx.searchsorted(pd.DatetimeIndex(sig["ts"])) if len(sig) else np.array([], int)
     by_bar: dict[int, list] = {}
     for i, row in zip(sig_pos, sig.itertuples(index=False)):
@@ -215,7 +218,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
         traded = tcost = 0.0
         bar_open = _aware(idx[t])
         bar_end = bar_open + blen
-        last_of_day = t == n - 1 or day[t + 1] != day[t]
+        day_close = _aware(idx[day_last[t]]) + blen          # 그날 장 마감 시각 (마지막 봉의 끝)
         if t >= lo:
             # 1) 보유 포지션 청산 판정
             for s in list(pos):
@@ -227,7 +230,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
                     continue
                 if np.isnan(C[t, j]) or not TR[t, j]:          # 가격 없음·거래 없는 날 → 판정 보류
                     continue
-                ex = _exit(P, O[t, j], H[t, j], L[t, j], C[t, j], bar_open, bar_end, bar_end if last_of_day else None,
+                ex = _exit(P, O[t, j], H[t, j], L[t, j], C[t, j], bar_open, bar_end, day_close,
                            rcfg, allow_target=True, check_open=True)
                 if ex:
                     a, c = close_pos(s, t, *ex)
@@ -259,7 +262,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
                           "risk": P.qty * m * abs(fill - P.stop) if P.stop is not None else np.nan,
                           "binding": P0.sizing.binding if P0.sizing else None}
                 # 체결 봉 안에서도 손절·(시가 체결이면) 목표가·당일 청산 판정
-                ex = _exit(P, o, h, l, c_, bar_open, bar_end, bar_end if last_of_day else None, rcfg,
+                ex = _exit(P, o, h, l, c_, bar_open, bar_end, day_close, rcfg,
                            allow_target=at_open, check_open=at_open)
                 if ex:
                     a, c = close_pos(s, t, *ex)
