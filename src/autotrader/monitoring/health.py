@@ -26,6 +26,7 @@ RULES = {
     "binance_um_oi": {"hours": 20},
     "upbit_1m": {"hours": 16},
     "crypto_fear_greed": {"hours": 50},
+    "news": {"hours": 36},  # 기사 시각 기준. 주말·연휴엔 기사가 적어 여유를 둔다
     "kr_1d": {"bdays": 2, "tz": "Asia/Seoul", "close_hour": 16},
     "kr_1m": {"bdays": 2, "tz": "Asia/Seoul", "close_hour": 16},
     "us_1d": {"bdays": 2, "tz": "America/New_York", "close_hour": 17},

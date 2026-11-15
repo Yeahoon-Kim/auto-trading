@@ -220,3 +220,37 @@ def test_alpaca_pages_and_skip_without_keys(monkeypatch, tmp_path):
     seen.clear()
     us_alpaca.run(["BRK-B"])
     assert seen == []
+
+
+def test_news_resumes_and_dedupes_by_id(monkeypatch, tmp_path):
+    """뉴스: 페이지를 따라가고, 다음 실행은 마지막 기사 시각부터 이어받으며, 같은 id는 한 번만 남는다."""
+    from autotrader.data import store
+    from autotrader.data.collectors import news
+
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path / "processed")
+    monkeypatch.setattr(store, "STATE_DB", tmp_path / "state.sqlite")
+    monkeypatch.setattr(news._limit, "wait", lambda: None)
+
+    def art(i, t):
+        return {"id": str(i), "created_at": t, "updated_at": t, "symbols": ["AAPL", "BTCUSD"], "headline": f"h{i}",
+                "summary": "", "source": "benzinga", "url": f"https://x/{i}", "author": "a", "images": []}
+
+    pages = {None: {"news": [art(1, "2015-01-01T13:00:00Z")], "next_page_token": "p2"},
+             "p2": {"news": [art(2, "2015-01-02T13:00:00Z")], "next_page_token": None}}
+    starts = []
+
+    def fake(client, url, params, **kw):
+        starts.append(params["start"])
+        return pages[params.get("page_token")]
+
+    monkeypatch.setattr(news, "get_json", fake)
+    h = {"APCA-API-KEY-ID": "x", "APCA-API-SECRET-KEY": "y"}
+    news.collect(h)
+    assert store.get_state("news", "ALL")["last_ts"] == pd.Timestamp("2015-01-02T13:00:00Z")
+
+    pages[None] = {"news": [art(2, "2015-01-02T13:00:00Z"), art(3, "2015-01-03T13:00:00Z")], "next_page_token": None}
+    news.collect(h)
+    assert starts[-1] == "2015-01-02T13:00:00Z"            # 이어받기: 마지막 기사 시각부터
+    df = store.read("news", "ALL")
+    assert df["id"].tolist() == [1, 2, 3] and df["symbols"].iloc[0] == "AAPL,BTCUSD"
+    assert str(df["ts"].dt.tz) == "UTC"
