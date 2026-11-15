@@ -85,7 +85,8 @@ def collect(market: str, phase: str) -> None:
     try:
         if phase == "latest" and st["last_ts"] is not None:
             _walk_back(market, None, st["last_ts"])
-        elif phase == "backfill" and not st["backfill_done"]:
+        # 시작일을 앞당기면 다시 거꾸로 채운다. 시작일 뒤 상장 코인은 매번 빈 페이지 1번만 확인하고 끝난다.
+        elif phase == "backfill" and (not st["backfill_done"] or (st["first_ts"] is not None and st["first_ts"] > start)):
             done = _walk_back(market, st["first_ts"], start)
             store.set_state(DATASET, market, backfill_done=done)
     except Exception as e:

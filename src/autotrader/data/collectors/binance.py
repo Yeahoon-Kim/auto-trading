@@ -186,13 +186,39 @@ def collect_positioning(symbol: str) -> None:
         logger.error(f"{dataset} {symbol} 실패: {e}")
 
 
+def backfill_klines(market: str, symbol: str) -> None:
+    """가장 오래된 봉보다 앞쪽을 월별 파일로 거꾸로 채운다 (설정의 start_1m까지).
+    직전 달 파일이 없으면(상장 전) 끝. 이미 다 채운 종목은 매번 파일 하나(404)만 확인한다."""
+    dataset = MARKETS[market]["dataset"]
+    st = store.get_state(dataset, symbol)
+    if st["first_ts"] is None:
+        return
+    start = pd.Timestamp(config()["binance"]["start_1m"], tz="UTC")
+    month = st["first_ts"].normalize().replace(day=1) - pd.DateOffset(months=1)
+    try:
+        while month >= start:
+            df = _vision_month(market, symbol, month)
+            if df is None:
+                break
+            n = store.write(dataset, symbol, df)
+            logger.info(f"{dataset} {symbol} {month:%Y-%m} {n}행 (과거 파일)")
+            month -= pd.DateOffset(months=1)
+    except Exception as e:
+        store.set_state(dataset, symbol, status="error", error=str(e)[:500])
+        logger.error(f"{dataset} {symbol} 과거분 실패: {e}")
+
+
 def run(symbols: list[str] | None = None) -> None:
     u = universe()
     if symbols:
         u = u[u["symbol"].isin(symbols)]
-    for _, row in u.iterrows():
+    for _, row in u.iterrows():  # 1) 최신분을 먼저 모두 맞춘다
         collect_klines("spot", row["symbol"])
         if row["has_perp"]:
             collect_klines("um", row["symbol"])
             collect_funding(row["symbol"])
             collect_positioning(row["symbol"])
+    for _, row in u.iterrows():  # 2) 그다음 과거분
+        backfill_klines("spot", row["symbol"])
+        if row["has_perp"]:
+            backfill_klines("um", row["symbol"])
