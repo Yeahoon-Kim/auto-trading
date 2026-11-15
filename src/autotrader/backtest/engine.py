@@ -412,11 +412,13 @@ def walk_forward(strategy, panel: Panel, params: dict, costs: Costs, fill: str =
                  **execution_kw(execution, pb.index, a, b))
         rows.append({"train": (str(a.date()), str(b.date())), "test": (str(c0.date()), str(c1.date())),
                      "params": p, "_train_result": tr})
-    # 시험 구간 첫 봉 체결에는 직전 학습 끝 신호가 필요 → 첫 창 직전 봉 신호도 붙인다
+    # 시험 구간 첫 봉 체결에는 직전 봉 신호가 필요하고, on_signal·on_change가 "목표가 바뀌었는지"를 보려면
+    # 그 전 봉 신호도 필요하다 → 첫 창 직전 2봉을 붙인다. 1봉만 붙이면 그 앞이 비중 0으로 보여
+    # 신호가 없는 첫 봉에 지난 신호로 전부 사는 가짜 리밸런싱이 생긴다 (L001: 한 번 실행 -51.0% vs WF -45.7%).
     first_test = pd.Timestamp(wins[0]["test"][0])
     p0 = rows[0]["params"]
     pre = align_weights(strategy.generate_signals(panel.slice(end=first_test), p0), panel.slice(end=first_test))
-    w_all = pd.concat([pre.iloc[-1:]] + stitched)
+    w_all = pd.concat([pre.iloc[-2:]] + stitched)
     w_all = w_all[~w_all.index.duplicated(keep="last")]
     pre_sd = pd.DatetimeIndex(pre.attrs["signal_dates"])
     w_all.attrs["signal_dates"] = tuple(pre_sd[pre_sd >= pre.index[-1]].append(sig_dates).unique())
