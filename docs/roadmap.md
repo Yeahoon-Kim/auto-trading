@@ -43,7 +43,18 @@
 
 ## Step 3 — 실행 모드
 - **paper**: KR/US는 KIS 모의투자 API(키는 추후 발급 예정), 코인은 Binance 테스트넷. 차익거래처럼 테스트넷이 없는 경우에는 실시간 시세로 가상 체결하는 시뮬레이터를 사용
+  - 구현 (2026-11-15): `uv run python -m autotrader.runner.paper labs/L###-이름` — 수집이 끝난 뒤 하루 한 번.
+    같은 `generate_signals()`로 목표 비중 → risk.yaml 한도 → 종가 기준 수량의 지정가 주문(±`paper.limit_band_pct`, 기본 5%)
+    → 다음 봉 시가에 가상 체결. 기록은 `results/paper/<lab>/` (book.json·events.jsonl·equity.csv), 요약은 텔레그램.
+    `--replay-days N`은 최근 N봉을 새 계좌로 재생해 엔진과 비교한다 (한도를 끄면 엔진과 같은 조건).
+  - 지원: kr_stock, crypto_spot(`lab.yaml`에 `paper.krw_per_unit` 필요), 롱만, rebalance `always`·`on_signal`.
+  - 엔진과 다른 점: 수량을 주문 시점(전날 종가)에 정한다(엔진은 체결 봉 시가) · 지정가 밖이면 취소 ·
+    상장폐지를 미리 모르므로 시세가 3회 연속 없으면 마지막 가격에 정리 · 분할·병합은 원본가/수정주가 수익 차이로 수량 조정.
+    합성 데이터 1년 최대 차이 0.18%, L001 실데이터 250봉: 한도 끔 최대 1.7%, risk.yaml 그대로 최대 4.0%
+    (지정가 밖 취소 18건 — 모멘텀 종목 갭 — 와 시세 결측 정리 1건).
+  - 비중형(`type: portfolio`)만. 종목 수·비중은 전략 그대로, risk.yaml은 계좌 보호 한도만 적용 (architecture.md §10).
+    신호형(`type: trade`)은 2단계.
 - **live**: `config/risk.yaml`의 `live_gate`를 통과한 전략만 소액으로 시작하고, 성과가 유지되면 단계적으로 증액
-- **퇴출**: 전략마다 `lab.yaml`의 `retirement` 조건으로 감시한다. 전략 간 상관관계와 포트폴리오 배분은 현재 범위가 아니다.
+- **퇴출**: 전략마다 `lab.yaml`의 `retirement` 조건으로 감시한다 (paper 데스크가 매 봉 확인 → 텔레그램 알림, 퇴출은 사람이 정함). 전략 간 상관관계와 포트폴리오 배분은 현재 범위가 아니다.
 - 운영 환경: 시나리오별로 로컬 PC, Docker, Oracle Cloud 무료 서버를 선택 (`deploy/`)
 - 모니터링: 텔레그램 알림, 매매 일지(`docs/journal/`)

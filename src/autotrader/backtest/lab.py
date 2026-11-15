@@ -99,8 +99,17 @@ def _panel(cfg: dict, lockbox: bool) -> Panel:
                 dividend_tax=cfg.get("dividend_tax"))
 
 
+def _portfolio_only(cfg: dict) -> None:
+    """이 엔진은 비중형(type: portfolio)만 돌린다. 신호형(trade)은 데스크 재생 백테스트로 (2단계)."""
+    kind = cfg.get("type") or "portfolio"
+    if kind != "portfolio":
+        raise SystemExit(f"type: {kind} — 공용 엔진은 비중형만 지원한다. 신호형 백테스트는 아직 구현 전 "
+                         "(docs/architecture.md §10)")
+
+
 def develop(lab_dir: Path, quick: bool = False) -> dict:
     cfg = yaml.safe_load((lab_dir / "lab.yaml").read_text(encoding="utf-8"))
+    _portfolio_only(cfg)
     strat = load_strategy(lab_dir)
     params = cfg.get("params") or {}
     wf = cfg.get("walk_forward") or {}
@@ -179,6 +188,7 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
 
 def open_lockbox(lab_dir: Path) -> dict:
     cfg = yaml.safe_load((lab_dir / "lab.yaml").read_text(encoding="utf-8"))
+    _portfolio_only(cfg)
     lb = cfg.get("lockbox") or {}
     if lb.get("opened"):
         raise SystemExit(f"잠금 구간은 이미 열렸다 ({lb.get('start')}~{lb.get('end')}). "

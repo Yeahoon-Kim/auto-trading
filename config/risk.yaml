@@ -1,24 +1,30 @@
-# 리스크 한도 — 모든 주문은 이 한도를 통과해야 실행됩니다 (src/autotrader/risk).
-# 값은 착수 후 투자 금액이 정해지면 조정. 지금은 보수적인 자리표시 값.
+# 리스크 한도 (src/autotrader/risk). 값은 착수 후 투자 금액이 정해지면 조정. 지금은 보수적인 자리표시 값.
+#
+# 두 층으로 나뉜다 (docs/architecture.md §10):
+# - 계좌 보호 (global·orders·data_staleness·position_guard·approval): 모든 전략 유형에 적용.
+#   버그·사고·폭주를 막는 용도이고 전략의 모양(종목 수·종목 비중)은 바꾸지 않는다.
+# - 신호형 전략 사이징 (trade): type: trade lab에만. 값은 lab.yaml trade 블록이 정하고 백테스트에 들어간다.
+#   여기서는 lab이 안 정했을 때의 기본값과, lab이 넘을 수 없는 상한만 둔다.
+#   비중형(type: portfolio)은 목표 비중이 곧 사이징이라 이 블록을 쓰지 않는다.
 
 global:
-  kill_switch: false            # true면 신규 주문 전면 중단
-  max_daily_loss_pct: 2.0       # 일일 손실이 총자산의 2% 넘으면 당일 거래 중단
-  max_drawdown_pct: 10.0        # 고점 대비 10% 하락 시 전체 중단 + 알림
+  kill_switch: false            # true면 신규 매수 전면 중단 (위험을 줄이는 매도는 허용). 사람이 켜고 끈다
+  # 낙폭·연속 손실 기준은 전략마다 다르므로 여기 두지 않는다 → lab.yaml retirement (전략 결과를 바꾸지 않고 퇴출 후보로 알림)
 
-per_strategy:
-  max_allocation_pct: 20.0      # 전략 하나에 배정할 최대 자본 비중
-  max_position_pct: 5.0         # 종목/코인 하나에 배정할 최대 비중
-  max_open_positions: 10
-
-sizing:
-  # src/autotrader/risk/sizing.py — 가장 엄한 한도가 수량을 정하고, 어떤 한도였는지 기록한다
-  risk_per_trade_pct: 1.0       # 거래당 위험 (손절까지 잃는 돈 / 총자산). 코드상 최대 2%
-  max_heat_pct: 6.0             # 열린 포지션 전체 위험 합계 한도
-  max_sector_pct: 30.0
-  kelly: half                   # 백테스트 승률·손익비가 있으면 하프 Kelly를 위험 비율의 상한으로만 사용
+trade:
+  defaults:                     # lab.yaml trade 블록에 없는 값
+    risk_per_trade_pct: 1.0     # 거래당 위험 (손절까지 잃는 돈 / 총자산)
+    max_heat_pct: 6.0           # 열린 포지션 전체 위험 합계
+    max_position_pct: 5.0       # 종목 하나 최대 비중
+    max_sector_pct: 30.0
+    max_open_positions: 10
+    kelly: half                 # 백테스트 승률·손익비가 있으면 하프 Kelly를 위험 비율의 상한으로만 사용 (none이면 안 씀)
+  caps:                         # lab이 이보다 크게 정하면 실행 거부 (더 엄하게는 가능)
+    risk_per_trade_pct: 2.0
+    max_heat_pct: 20.0
 
 orders:
+  max_gross_weight: 1.0         # 비중형: 목표 비중 합 상한 (1 = 레버리지 없음). 넘거나 음수 비중이면 그날 주문 전부 보류 + 알림
   max_order_value_krw: 1000000  # 1회 주문 최대 금액 (실전 초기엔 작게)
   max_orders_per_minute: 20     # 버그로 인한 주문 폭주 방지
   require_limit_orders: true    # 시장가 주문 금지 (스캘핑 전략만 예외 허용 예정)

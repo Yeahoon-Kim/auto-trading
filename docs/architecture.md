@@ -80,7 +80,7 @@
 |---|---|
 | A (지금) | 데이터 수집 완료, **시장정보팀**(국면 지표 + 매일 보고서), lab 프레임워크, 검증팀 서브에이전트 |
 | B | 공용 백테스트 엔진 ✅ (2026-11-15, `backtest/engine.py`·`data.py`·`lab.py`), 첫 lab들 (국면 지표를 조건으로 쓰는 전략 포함) |
-| C | 운용데스크 + 리스크 + 운영을 모의투자로 서버에서 가동, 매일 보고 |
+| C | 운용데스크 + 리스크 + 운영을 모의투자로 서버에서 가동, 매일 보고. 🔧 일봉 비중 전략용 paper 데스크 골격 (2026-11-15, `execution/paper.py`·`runner/paper.py`, 가상 체결) — 브로커 모의 계좌·예약 실행은 아직 |
 | D | 검증된 전략만 소액 실전, 주간 회의로 증액·퇴출 |
 
 ## 7. LLM 판단 전략의 검증 트랙
@@ -156,6 +156,37 @@ LLM 에이전트는 **판단·해석·검토**만 맡고, 숫자 계산과 주�
 | 9 | 오프라인 테스트 (샘플 데이터로 네트워크 없이) | day-trader-skill | `tests/test_core.py`, `tests/test_risk.py` | ✅ 핵심 로직 13개 + 리스크 계층 10개 |
 | 10 | 진입 직전 과거 유사 사례 확인 (선택) | day-trader-skill | `backtest/replay.py` | ✅ |
 | 11 | 장 전 스캐너 (셋업 규칙 + 유동성 필터) | trader-scanner | `intel/scanner.py`, 08:00 브리핑 | ✅ |
-| 12 | 포지션 사이징 (가장 엄한 한도, 내림, 하프 Kelly, heat) | position-sizer | `risk/sizing.py`, `risk.yaml` `sizing` | ✅ (주문 경로 연결은 운용데스크 구현 때) |
+| 12 | 포지션 사이징 (가장 엄한 한도, 내림, 하프 Kelly, heat) | position-sizer | `risk/sizing.py`, `risk.yaml` `trade`, lab.yaml `trade` | ✅ 신호형 전용으로 정리 (10절). 주문 경로 연결은 신호형 경로 구현 때 |
 | 13 | LLM 판단 기록·사후 채점 | TradingAgents | `llm/decision_log.py` | ✅ (llm-desk 구현 때 사용) |
 | 14 | market-analyst 해석 문단 | — | `intel/analyst.py`, 08:00 브리핑 | ✅ |
+
+## 10. 전략 실행 유형: 비중형과 신호형 (2026-11-15 결정)
+
+배경: 리스크 계층(Signal→Plan, 손절 기반 사이징, 종목 수 한도)은 단타·신호형 매매 도구(day-trader-skill, position-sizer)에서
+가져왔고, 공용 백테스트 엔진은 "날짜 × 종목 목표 비중"을 받는다. 두 설계를 맞춰 보지 않아, paper 데스크를 붙일 때
+risk.yaml의 종목 수 한도(10)가 20종목 비중 전략을 잘라내는 문제가 드러났다.
+
+원칙: **사이징·청산 규칙은 백테스트에 들어가야 한다.** 데스크에서만 적용하면 검증하지 않은 전략을 돌리게 된다.
+
+| | 비중형 `type: portfolio` | 신호형 `type: trade` |
+|---|---|---|
+| 전략이 내는 것 | 날짜 × 종목 목표 비중 (`generate_signals`) | 진입 신호 (종목·방향·진입가·손절가·목표가·당일 청산) |
+| 사이징 | 비중이 곧 사이징. 종목 수·비중은 전략이 정함 | `sizing.size()` — 값은 lab.yaml `trade` 블록 (기본값·상한은 risk.yaml `trade`) |
+| 청산 | 다음 리밸런싱 | 손절·목표가·장 마감 전 청산 (`guards.check_position`) |
+| 백테스트 | 공용 엔진 (`backtest/engine.py`) | 데스크 처리 코드를 과거 봉으로 재생 (고가·저가로 손절 판정) — **2단계, 미구현** |
+| paper·live | `execution/paper.py` 리밸런싱 경로 ✅ | Signal → `make_plan` → Order → Fill + 포지션 감시 — **2단계** |
+
+한도는 두 층이다 (`config/risk.yaml`).
+- **계좌 보호 (모든 유형)**: kill_switch(사람이 켬) → 신규 매수 중단(매도는 허용) · 1회 주문 금액 · 분당 주문 수 ·
+  데이터 신선도 · 지정가 강제 · 비중 합 상한(`max_gross_weight`)·음수 비중 → 버그 의심으로 그날 주문 보류.
+  전략의 모양(종목 수·종목 비중)은 바꾸지 않는다.
+- **신호형 사이징 (`trade`)**: 거래당 위험, heat, 종목 비중, 섹터 비중, 보유 종목 수, Kelly. lab이 정하고, risk.yaml은
+  기본값(`defaults`)과 넘을 수 없는 상한(`caps`: 거래당 위험 2%, heat 20%)만 둔다.
+- **낙폭·연속 손실은 lab의 퇴출 조건 (`retirement`)**: 일일 손실 2%·최대 낙폭 10%로 매수를 자동 차단하던 전역 한도는 뺐다.
+  L001 재생에서 이 차단이 102건 걸려 백테스트와 다른 전략이 됐다 (월 리밸런싱 날 -2%면 그달 매수를 통째로 건너뜀).
+  대신 lab.yaml `retirement.max_drawdown_pct`·`max_losing_days`를 데스크가 매 봉 감시하고, 걸리면 텔레그램으로 알린다.
+  매매는 백테스트와 같게 계속하고 퇴출(`status: retired`)은 사람이 정한다. paper·live 상태 lab은 둘 중 하나가 필수.
+  실전에서 즉시 멈춰야 하면 kill_switch를 켠다.
+- 전략 간 자본 배분(`max_allocation_pct`)은 범위 밖이라 뺐다 (로드맵 Step 3).
+
+2단계(신호형 경로)는 첫 신호형 lab과 함께 만든다 — 실제 전략 없이 인터페이스를 미리 정하지 않는다.

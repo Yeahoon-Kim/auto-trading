@@ -112,6 +112,25 @@ def test_min_notional_blocks_with_reason():
     assert guards.check_min_notional(5_000, 10_000, cfg(orders__min_notional_check=False)) is None
 
 
+# --- §10 신호형 사이징 값 (lab.yaml trade 블록) ---
+
+def test_trade_params_defaults_override_and_caps():
+    """risk.yaml 기본값 위에 lab.yaml trade 블록. 상한은 넘을 수 없다."""
+    assert guards.trade_params(None, CFG) == CFG["trade"]["defaults"]
+    p = guards.trade_params({"max_open_positions": 30, "risk_per_trade_pct": 0.5, "kelly": None}, CFG)
+    assert p["max_open_positions"] == 30 and p["risk_per_trade_pct"] == 0.5 and p["kelly"] == "half"
+    with pytest.raises(ValueError, match="상한"):
+        guards.trade_params({"risk_per_trade_pct": 3.0}, CFG)
+    with pytest.raises(ValueError, match="모르는"):
+        guards.trade_params({"max_positions": 5}, CFG)
+
+
+def test_make_plan_uses_lab_trade_params():
+    acc = guards.Account(equity=1e8, open_positions=10)
+    assert "보유 종목" in guards.make_plan(sig(), acc, NOW, CFG).blocked          # 기본 한도 10
+    assert guards.make_plan(sig(), acc, NOW, CFG, trade={"max_open_positions": 20}).approved
+
+
 # --- §9-5 보유 포지션 보호 ---
 
 def pos(**kw):
