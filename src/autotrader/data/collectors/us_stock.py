@@ -117,4 +117,6 @@ def run(what: str = "all", symbols: list[str] | None = None) -> None:
     if what in ("all", "minute"):
         collect_minute(tickers)
     if what in ("all", "daily"):
+        if not symbols:  # 벤치마크 ETF는 유니버스(구성종목)와 따로 일봉만 받는다
+            tickers = tickers + [t for t in config()["us"].get("benchmarks_1d", []) if t not in tickers]
         collect_daily(tickers)

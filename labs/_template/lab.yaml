@@ -12,8 +12,19 @@ llm:                     # category: llm 일 때만
   baselines: [buy_and_hold, momentum, random]
   forward_start: ""      # 앞으로 검증 시작일 (최소 60거래일)
 market: kr_stock         # kr_stock | us_stock | crypto_spot | crypto_futures | cross_market
-universe: ""             # 예: KOSPI200, S&P500, BTCUSDT
-timeframe: 1d            # 1m | 5m | 1h | 1d ...
+universe: ""             # 종목 목록 [005930, 000660] / ALL / KOSPI·KOSDAQ(kr_stock, 그날 소속 기준)
+timeframe: 1d            # 1d (주식) | 1h·4h·1d … (코인, 1분봉을 묶음)
+data_start: ""           # 데이터 읽기 시작일 (지표 준비 기간 포함). 비우면 전체
+fields: []               # open·close 외에 필요한 것: high, low, volume, value, market_cap, raw_close …
+fill: next_open          # next_open (다음 봉 시가 체결) | next_close (다음 봉 종가)
+currency: ""             # us_stock: KRW면 그날 원/달러(ECOS)로 환산해 환율 변동까지 수익에 넣음
+dividend_tax:            # us_stock: 배당 재투자 때 떼는 비율 (비우면 settings의 원천징수 15%, 0이면 전액)
+
+execution:               # 비워 두면 비중만 계산 (자본 1 기준, 소수점 주식, 매 봉 리밸런싱)
+  capital:               # 초기 자본 (예: 10000000). 주면 평가액·투입액·XIRR을 같이 낸다
+  monthly_contribution:  # 매월 첫 봉 적립금 (예: 1000000)
+  whole_shares: false    # true면 정수 주식만 (capital이나 적립금 필요)
+  rebalance: always      # always | on_change (목표가 바뀔 때·적립금 들어올 때만 매매)
 
 data_snapshot: ""        # 사용한 데이터 스냅샷 ID (재현용)
 
@@ -30,10 +41,11 @@ lockbox:                 # 판정 시 자동 기록 (실행일 기준 최근 6�
 costs:                   # 비워 두면 config/settings.yaml 기본값 사용
   fee_pct:
   slippage_pct:
+  tax_pct_sell:          # 비우면 settings의 연도별 세율표
 
 params: {}               # 전략 파라미터
 
-benchmark: ""            # 예: KOSPI, SPY, BTC 보유
+benchmark: ""            # SPY_tr_wht 등 benchmark.py 변형, 또는 universe 안의 종목 (매수 후 보유)
 
 retirement:              # 전략별 퇴출 조건 (live 단계에서 감시)
   max_drawdown_pct:      # 예: 개발 구간 MDD × 1.5

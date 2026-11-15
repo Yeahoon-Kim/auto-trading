@@ -47,6 +47,30 @@ LLM이 판단에 들어가는 전략은 과거 백테스트 대신 **앞으로 �
 ## 새 lab 만들기
 `_template`을 `L###-짧은-이름` 형식으로 복사합니다 (예: `L001-btc-funding-arb`).
 
+## 백테스트 실행 (공용 엔진)
+```
+uv run python -m autotrader.backtest.lab labs/L001-이름            # 개발 구간 워크포워드 + 기준 1~5·7(자동분)
+uv run python -m autotrader.backtest.lab labs/L001-이름 --quick    # ±20% 민감도 생략 (개발 중)
+uv run python -m autotrader.backtest.lab labs/L001-이름 --lockbox  # 최종 판정 때 1회 (기준 6). lab.yaml lockbox에 자동 기록
+```
+- 결과: `labs/<lab>/results/<실행시각>/report.md`, `summary.json`, 수익률 parquet. 판정은 하지 않는다 (validator 검증 후).
+- 데이터: `autotrader.backtest.data.load()` — 잠금 구간은 `--lockbox` 없이는 읽히지 않는다.
+  KR은 `krx_1d`(상장폐지 포함) + 수정계수, US는 `us_1d`(현재 종목 → 생존편향 있음), 코인은 1분봉을 `timeframe`으로 묶음.
+- 체결: 봉 t 종가에 정한 비중을 봉 t+1 시가(`fill: next_open`)나 종가(`next_close`)에 맞춘다.
+- 비용: 회전율(가격 변동으로 흘러간 비중을 되돌리는 것 포함) × (수수료 + 슬리피지), 롱 매도분 × 매도세. 2배 비용도 자동 계산.
+  KR 매도세는 `config/settings.yaml`의 연도별 세율표로 매도일마다 적용한다 (2025년 0.15%, 2026년 0.20% 등).
+- 금액·실행 방식 (`lab.yaml` `execution`): `capital`(초기 자본), `monthly_contribution`(월초 적립금),
+  `whole_shares`(정수 주식, 1주 미만은 현금), `rebalance: on_change`(목표가 바뀔 때·적립금 들어올 때만 매매).
+  자본을 주면 리포트에 투입액·평가액·투입 대비 수익률·XIRR이 붙는다. Sharpe·MDD는 적립금 영향을 뺀 시간가중 수익률 기준.
+- US 주식: 배당은 기본으로 원천징수 15%를 떼고 재투자 (`dividend_tax`로 변경), `currency: KRW`면 그날 원/달러(ECOS)로 환산해 환율 변동까지 수익에 넣는다.
+- 상장폐지 종목은 마지막 가격 다음 봉에 그 가격으로 강제 청산한다 (낙관적 가정 — 리포트에 횟수 표시).
+- 미래참조 자동 검사: 데이터를 3곳에서 잘라 다시 계산한 신호가 원래와 같은지 비교한다. 통과해도 데이터 시점 규칙(거시 `shift(1)`, 공시 다음 날, 재무 +45/+90일)은 validator가 따로 본다.
+- 반영 안 하는 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격, 양도소득세·배당세, 현금 이자.
+
+## 벤치마크
+US 주식 lab은 S&P500 매수 후 보유(`SPY_tr_wht`)와 같은 기간으로 비교합니다.
+`autotrader.backtest.benchmark.benchmark_returns()`로 받고, 기준 수치는 [docs/research/benchmark-sp500.md](../docs/research/benchmark-sp500.md)를 봅니다.
+
 ## 현황판
 
 | ID | 이름 | 시장 | 유형 | 상태 | 판정 |
