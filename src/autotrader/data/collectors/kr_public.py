@@ -5,6 +5,9 @@
 - dart_disclosures (symbol=ALL)  : 전체 상장사 공시 목록. 접수일(rcept_dt)만 있으므로
       일봉 전략에서는 "접수일 다음 날부터 알 수 있음"으로 쓴다. 하루 호출 한도(약 2만) 때문에
       백필은 실행마다 최대 MAX_DART_CALLS 만큼 진행한다.
+- dart_fin (symbol=ALL)          : 상장사 주요계정 재무(매출·영업이익·순이익·자산·부채·자본), 2015~.
+      손익은 3개월 값과 _cum(누적). 4분기는 보고서가 없으므로 FY − Q3 누적으로 계산해서 쓴다.
+      filed = 접수번호 앞 8자리(실제 접수일) → 시점 규칙은 "filed 다음 날부터 알 수 있음".
 - ecos (symbol=시계열 이름)      : 기준금리, 국고채 3·10년, 회사채 AA-, CD91, 원/달러.
 """
 
@@ -133,6 +136,100 @@ def collect_dart() -> None:
         logger.error(f"{ds} 실패: {e}")
 
 
+# ── DART 재무 (주요계정) ──
+FIN_START = 2015  # fnlttMultiAcnt 제공 시작 연도
+REPORTS = {"11013": "Q1", "11012": "H1", "11014": "Q3", "11011": "FY"}  # 4분기 보고서는 제도상 없음
+ACCOUNTS = {  # DART account_nm → 컬럼
+    "매출액": "revenue", "영업이익": "operating_income", "영업이익(손실)": "operating_income",
+    "법인세차감전 순이익": "pretax_income", "당기순이익(손실)": "net_income", "총포괄손익": "comprehensive_income",
+    "유동자산": "current_assets", "비유동자산": "noncurrent_assets", "자산총계": "total_assets",
+    "유동부채": "current_liabilities", "비유동부채": "noncurrent_liabilities", "부채총계": "total_liabilities",
+    "자본금": "capital_stock", "이익잉여금": "retained_earnings", "자본총계": "total_equity",
+}
+FLOW = ("revenue", "operating_income", "pretax_income", "net_income", "comprehensive_income")
+
+
+def _corp_codes() -> pd.DataFrame:
+    """2015년 이후 KRX에 상장돼 있던 종목(상장폐지 포함)의 DART 고유번호."""
+    import io
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    _dart_limit.wait()
+    r = _http.get("https://opendart.fss.or.kr/api/corpCode.xml", params={"crtfc_key": os.environ["DART_API_KEY"]})
+    r.raise_for_status()
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    root = ET.fromstring(z.read(z.namelist()[0]))
+    m = pd.DataFrame([{"corp_code": e.findtext("corp_code").strip(), "symbol": e.findtext("stock_code").strip()}
+                      for e in root.iter("list")])
+    m = m[m["symbol"] != ""]
+    krx = store.query(f"SELECT DISTINCT symbol FROM '{store.DATA_DIR.as_posix()}/krx_1d/ALL/*.parquet' "
+                      f"WHERE ts >= '{FIN_START}-01-01'")
+    return m[m["symbol"].isin(krx["symbol"])].drop_duplicates("symbol").reset_index(drop=True)
+
+
+def _num(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s.astype(str).str.replace(",", "").str.strip().replace({"": None, "-": None}), errors="coerce")
+
+
+def _dart_fin(codes: list[str], year: int, reprt: str) -> pd.DataFrame:
+    """100개사 묶음 × 한 보고서 → 회사당 1행 (연결 우선, 없으면 별도). 손익은 3개월 값 + _cum(누적)."""
+    _dart_limit.wait()
+    j = get_json(_http, "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json",
+                 {"crtfc_key": os.environ["DART_API_KEY"], "corp_code": ",".join(codes),
+                  "bsns_year": str(year), "reprt_code": reprt})
+    if j.get("status") == "013":
+        return pd.DataFrame()
+    if j.get("status") != "000":
+        raise RuntimeError(f"DART fin {j.get('status')}: {j.get('message')}")
+    d = pd.DataFrame(j["list"])
+    d["col"] = d["account_nm"].str.strip().map(ACCOUNTS)
+    d = d.dropna(subset=["col"])
+    d = d[d["fs_div"] == d.groupby("corp_code")["fs_div"].transform("min")]  # 'CFS' < 'OFS' → 연결 우선
+    d["ord"] = pd.to_numeric(d["ord"], errors="coerce")
+    d = d.sort_values("ord").drop_duplicates(["corp_code", "col"], keep="first")  # 당기순이익 2행 중 첫 행
+    d["v"] = _num(d["thstrm_amount"])
+    d["v_cum"] = _num(d["thstrm_add_amount"]) if "thstrm_add_amount" in d else float("nan")
+    wide = d.pivot(index="corp_code", columns="col", values="v")
+    cum = d[d["col"].isin(FLOW)].pivot(index="corp_code", columns="col", values="v_cum").add_suffix("_cum")
+    meta = d.groupby("corp_code").agg(symbol=("stock_code", "first"), rcept_no=("rcept_no", "first"),
+                                      fs_div=("fs_div", "first"), currency=("currency", "first"),
+                                      period_end=("thstrm_dt",  # "2025.01.01 ~ 2025.06.30", "2025.06.30 현재"
+                                                  lambda s: s.str.findall(r"\d{4}\.\d{2}\.\d{2}").str[-1].max()))
+    out = meta.join(wide).join(cum).reset_index()
+    if reprt == "11011":  # 사업보고서: 당기 = 연간 = 누적
+        for c in FLOW:
+            if c in out:
+                out[f"{c}_cum"] = out[c]
+    out["ts"] = _kst_ts(out["period_end"].str.replace(".", "", regex=False))
+    out["filed"] = _kst_ts(out["rcept_no"].str[:8])  # 접수일 (정정 공시면 정정일)
+    out["bsns_year"], out["reprt_code"], out["period"] = year, reprt, REPORTS[reprt]
+    return out.drop(columns="period_end")
+
+
+def collect_dart_fin() -> None:
+    """dart_fin (symbol=ALL): 상장사 주요계정 재무. 첫 실행은 2015~ 전체, 이후엔 최근 2개 사업연도만 다시 받는다
+    (새 보고서·정정 반영). 호출 수는 (종목수/100) × 4 × 연도수 — 전체 백필 약 1,600회."""
+    ds = "dart_fin"
+    try:
+        codes = _corp_codes()["corp_code"].tolist()
+        st = store.get_state(ds, "ALL")
+        now = pd.Timestamp.now(tz=KST).year
+        years = range(now - 1 if st["backfill_done"] else FIN_START, now + 1)
+        n = 0
+        for y in years:
+            for reprt in REPORTS:
+                parts = [_dart_fin(codes[i:i + 100], y, reprt) for i in range(0, len(codes), 100)]
+                df = pd.concat([p for p in parts if not p.empty], ignore_index=True) if any(
+                    not p.empty for p in parts) else pd.DataFrame()
+                n += store.write(ds, "ALL", df, key=["symbol", "bsns_year", "reprt_code"])
+        store.set_state(ds, "ALL", backfill_done=True)
+        logger.info(f"{ds} {len(codes)}개사 × {len(years)}년, {n:,}행")
+    except Exception as e:
+        store.set_state(ds, "ALL", status="error", error=str(e)[:500])
+        logger.error(f"{ds} 실패: {e}")
+
+
 # ── ECOS ──
 def collect_ecos() -> None:
     key = os.environ["ECOS_API_KEY"]
@@ -158,4 +255,5 @@ def collect_ecos() -> None:
 def run(symbols: list[str] | None = None) -> None:
     collect_ecos()
     collect_krx()
+    collect_dart_fin()  # 호출 수가 적으니 공시 목록 백필(한도 소진형)보다 먼저
     collect_dart()

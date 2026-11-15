@@ -38,6 +38,7 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 | `crypto_fear_greed` | 코인 공포·탐욕 지수 | alternative.me | 2018~ | 매일 |
 | `krx_1d` (symbol=ALL) | KOSPI·KOSDAQ **전 종목** 원본 일봉 + 시가총액 + 상장주식수 (그날 상장 종목 전부 → 생존편향 없음) | KRX Open API | 2010~ | 매일 (KRX는 다음 영업일 공개) |
 | `dart_disclosures` (symbol=ALL) | 전체 상장사 공시 목록 (접수번호, 종목, 보고서명, 제출인) | OpenDART | 2024~ (하루 1.5만 호출씩 백필) | 매일 |
+| `dart_fin` (symbol=ALL) | 상장사 **주요계정 재무**: 매출·영업이익·세전이익·순이익·총포괄손익(3개월 값 + `_cum` 누적), 유동·비유동 자산·부채, 자본금·이익잉여금·자본총계. 연결 우선, 없으면 별도. `filed` = 실제 접수일 | OpenDART `fnlttMultiAcnt` | 2015~, 2015년 이후 KRX 상장 종목(상장폐지 포함 중 DART 매핑되는 것) | 매일 (최근 2개 사업연도 재수집) |
 | `ecos` | 기준금리, 국고채 3·10년, 회사채 AA- 3년, CD 91일, 원/달러 | 한국은행 ECOS | 2005~ | 매일 |
 | `legacy/*.parquet` | 기존 stock-analysis-site DB에서 가져온 것: 일봉(KR 3,259·US 5,487종목, 2016-08~ +시가총액), 실제 지수 구성종목, 재무제표(K-IFRS 349사·US GAAP 511사, 2021~), 공시(SEC 1995~, DART 2024-08~), 내부자 거래(SEC Form 4 2000~) | Docker Postgres (1회 가져오기) | 표 참고 | 수동 (`collect legacy`) |
 | `scan_hits` (symbol=ALL) | 장 전 스캐너가 규칙에 맞았다고 표시한 종목 (시장·셋업·종가·20일 평균 거래대금) | 위 데이터에서 계산 | 2026-11-15~ (셋업 함수로 과거 재계산 가능) | 매일 08:00 |
@@ -57,7 +58,12 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 - **거시 지표 시점**: `macro_1d`·`fred`·`regime_1d`의 날짜는 관측일이다. 실제로 알 수 있는 건 다음 날이므로 전략에서는 `shift(1)` 해서 쓴다.
 - **FRED 신용 스프레드**(ICE BofA)는 라이선스 문제로 최근 3년만 제공된다. 그 이전 구간의 국면 지표에서는 이 신호가 빠진다.
 - **공시 시점**: DART는 접수일만 있으므로 일봉 전략에서는 다음 날부터 알 수 있는 정보로 쓴다.
-- **legacy 재무제표**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다.
+- **KR 재무는 `dart_fin`을 쓴다** (legacy는 2026-08 1회 가져오기라 갱신되지 않는다).
+  - 시점: `filed` 다음 날부터 알 수 있는 정보로 쓴다. 기존의 +45일 규칙은 실제 접수보다 이를 수 있다. 예: 삼성전자 2025 반기는 추정 8/12, 실제 접수 8/14.
+  - 4분기: 국내에는 4분기 보고서가 없다. 4분기는 `FY − Q3의 _cum`으로 계산하고, 알 수 있는 시점은 사업보고서 접수일이다. 4분기 잠정실적은 공시 목록의 "영업(잠정)실적"이 더 빠르다.
+  - 정정: DART는 최신(정정) 값을 준다. 정정된 보고서는 `filed`가 정정일이라 시점은 보수적이다. 다만 정정 전 원래 값은 남지 않는다.
+  - 업종: 금융업은 계정이 달라 매출액·영업이익이 비는 경우가 있다 (영업수익 등).
+- **legacy 재무제표 (US)**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다. 같은 기간 중복과 9개월 누적 행이 섞여 있다.
 - **legacy US 일봉**: 분할 반영 가격이고 상장폐지 종목이 없다 (생존편향).
 - **KR 분봉 유니버스**: 시총 상위 350개 + 실제 KOSPI200·KOSDAQ150 구성종목(2026-08 기준) 합집합, 420개.
 - **KRX 지수 API**: 현재 키로는 401(미신청 서비스). 필요하면 KRX Open API에서 지수 서비스를 추가 신청한다.
@@ -70,7 +76,17 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 uv run python -m autotrader.data.cli health            # 신선도·오류·디스크 점검
 uv run python -m autotrader.intel.market               # 국면 지표 + 스캐너 + LLM 해석, 브리핑 출력 (--no-llm, --no-scan)
 uv run python -m autotrader.intel.scanner              # 스캐너만 (reports/scan/날짜.json)
+uv run python -m autotrader.intel.company 005930 --peers 000660 [--asof 2024-06-30]  # 기업 스냅샷 (fundamental-analyst용)
 ```
+
+- 기업 스냅샷의 재무 출처는 KR이 `dart_fin`, US가 legacy다.
+  - KR에서 `dart_fin`에 없는 종목은 legacy로 대신한다.
+  - 4분기는 `Q4*`로 계산한다.
+  - legacy US의 중복·누적 행은 기간당 1행으로 줄이고, 급변한 값에는 `급변·원문확인` 표시를 붙인다.
+- `--asof`는 그 날짜에 알 수 있던 정보만 보여 준다.
+  - 가격: 현지 날짜 기준
+  - DART 재무·공시: 접수일 다음 날부터
+  - legacy 재무: 추정 공개일부터
 
 - 작업 스케줄러: `autotrader-collect`(07:30, 17:00, 로그인), `autotrader-brief`(08:00), `autotrader-health`(12:00, 20:00)
 - 수집기 전체가 오류로 죽으면 즉시 텔레그램 알림. 강제 종료처럼 알릴 틈이 없는 경우는 health 점검이 데이터 신선도로 잡아낸다.
