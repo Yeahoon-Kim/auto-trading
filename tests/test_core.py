@@ -188,3 +188,35 @@ def test_decision_log_settles_after_horizon(tmp_path):
     assert len(done) == 1                                   # 두 번째는 아직 기간이 안 지남
     d = decision_log.load(path)[0]
     assert d.entry_ts.startswith("2026-01-03") and d.ret == pytest.approx(105 / 102 - 1) and d.alpha == d.ret
+
+
+def test_alpaca_pages_and_skip_without_keys(monkeypatch, tmp_path):
+    """Alpaca 분봉: 페이지를 끝까지 따라가고, 키가 없으면 아무것도 하지 않는다."""
+    from autotrader.data import store
+    from autotrader.data.collectors import us_alpaca
+
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path / "processed")
+    monkeypatch.setattr(store, "STATE_DB", tmp_path / "state.sqlite")
+    monkeypatch.setattr(us_alpaca._limit, "wait", lambda: None)
+    pages = {
+        None: {"bars": {"BRK.B": [{"t": "2016-01-04T14:30:00Z", "o": 1, "h": 2, "l": 0.5, "c": 1.5, "v": 10,
+                                   "n": 3, "vw": 1.2}]}, "next_page_token": "p2"},
+        "p2": {"bars": {"BRK.B": [{"t": "2016-01-04T14:31:00Z", "o": 1.5, "h": 2, "l": 1, "c": 1.8, "v": 5,
+                                   "n": 2, "vw": 1.6}]}, "next_page_token": None},
+    }
+    seen = []
+
+    def fake(client, url, params, **kw):
+        seen.append(params["symbols"])
+        return pages[params.get("page_token")]
+
+    monkeypatch.setattr(us_alpaca, "get_json", fake)
+    us_alpaca.collect("BRK-B", {"APCA-API-KEY-ID": "x", "APCA-API-SECRET-KEY": "y"})
+    df = store.read("us_1m_sip", "BRK-B")
+    assert len(df) == 2 and seen == ["BRK.B", "BRK.B"]
+    assert store.get_state("us_1m_sip", "BRK-B")["last_ts"] == pd.Timestamp("2016-01-04T14:31:00Z")
+
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    seen.clear()
+    us_alpaca.run(["BRK-B"])
+    assert seen == []

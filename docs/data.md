@@ -30,6 +30,7 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 | `kr_1m` | 국내 1분봉 | KIS | 시총 상위 KOSPI 200 + KOSDAQ 150, KIS 보관 한도(약 1년, 2025-11-05 이전 없음 확인)까지 | 매일 |
 | `us_1d` | 미국 일봉 + adj_close | Yahoo | S&P500 + Nasdaq100, 2010~ | 매일 |
 | `us_1m` | 미국 1분봉 | Yahoo | 같음, 최근 30일부터 누적 (Yahoo·KIS 해외분봉 모두 약 1개월만 제공, 더 과거는 유료·별도 계정 필요) | 매일 |
+| `us_1m_sip` | 미국 1분봉 장기 이력 (SIP 전체 거래소, 원본 가격, 프리·애프터 포함) | Alpaca 무료 플랜 (키 필요) | 같음, 2016~ | 매일 |
 
 | `binance_um_oi` | 미결제약정 + 계정 롱/숏 비율 (1시간) | API | Binance 유니버스, **최근 30일만 제공 → 매일 누적** | 매일 |
 | `macro_1d` | VIX·VIX3M·MOVE, S&P500·나스닥·러셀·KOSPI·KOSDAQ, 원/달러·달러·엔, 미 10년 금리, WTI·금·구리 | Yahoo | 2010~ | 매일 |

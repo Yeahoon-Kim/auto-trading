@@ -19,3 +19,4 @@ us:
   start_1d: "2010-01-01"
   universe: [SP500, NASDAQ100]
   # 1분봉은 yfinance 제공 범위(최근 30일)만 백필 → 이후 매일 누적
+  start_1m_sip: "2016-01-01"   # Alpaca 무료 플랜 1분봉(us_1m_sip) 시작. 키가 있어야 수집

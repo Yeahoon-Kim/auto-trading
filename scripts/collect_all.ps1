@@ -3,7 +3,7 @@
 #   사용: powershell -ExecutionPolicy Bypass -File scripts\collect_all.ps1
 #   일부만: ... -File scripts\collect_all.ps1 -Sources binance,kr
 
-param([string[]]$Sources = @("binance", "upbit", "kr", "us", "macro", "kr-public"))
+param([string[]]$Sources = @("binance", "upbit", "kr", "us", "us-sip", "macro", "kr-public"))
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
