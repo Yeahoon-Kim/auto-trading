@@ -3,6 +3,7 @@
 #   autotrader-collect : 07:30 (미국장 마감 후), 17:00 (국내장 마감 후), 로그인할 때 — 전체 수집
 #   autotrader-brief   : 08:00 — 국면 지표 재계산 + 장 전 브리핑 텔레그램 전송
 #   autotrader-health  : 12:00, 20:00 — 수집 상태 점검, 문제 있을 때만 텔레그램 알림
+#   autotrader-ops     : 23:00 — 운영 마감 보고 (사실 표 + ops-reporter 요약) 텔레그램 전송
 #
 #   PC가 꺼져 있어 놓친 실행은 켜진 직후 실행된다 (StartWhenAvailable).
 #   모든 소스가 과거분을 보관하고 있어서 며칠 꺼져 있어도 다음 실행 때 빈 구간을 채운다.
@@ -36,3 +37,7 @@ Register "autotrader-health" "run_module.ps1" "autotrader.data.cli health --noti
     (New-ScheduledTaskTrigger -Daily -At "12:00"),
     (New-ScheduledTaskTrigger -Daily -At "20:00")
 ) "auto-trading 수집 상태 점검"
+
+Register "autotrader-ops" "run_module.ps1" "autotrader.monitoring.daily_report --notify" @(
+    (New-ScheduledTaskTrigger -Daily -At "23:00")
+) "auto-trading 운영 마감 보고"
