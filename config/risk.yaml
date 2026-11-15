@@ -11,6 +11,13 @@ per_strategy:
   max_position_pct: 5.0         # 종목/코인 하나에 배정할 최대 비중
   max_open_positions: 10
 
+sizing:
+  # src/autotrader/risk/sizing.py — 가장 엄한 한도가 수량을 정하고, 어떤 한도였는지 기록한다
+  risk_per_trade_pct: 1.0       # 거래당 위험 (손절까지 잃는 돈 / 총자산). 코드상 최대 2%
+  max_heat_pct: 6.0             # 열린 포지션 전체 위험 합계 한도
+  max_sector_pct: 30.0
+  kelly: half                   # 백테스트 승률·손익비가 있으면 하프 Kelly를 위험 비율의 상한으로만 사용
+
 orders:
   max_order_value_krw: 1000000  # 1회 주문 최대 금액 (실전 초기엔 작게)
   max_orders_per_minute: 20     # 버그로 인한 주문 폭주 방지

@@ -151,13 +151,29 @@ def brief(df: pd.DataFrame, health_line: str = "") -> str:
 def main() -> None:
     p = argparse.ArgumentParser(prog="autotrader.intel.market")
     p.add_argument("--notify", action="store_true", help="텔레그램으로 보내기")
+    p.add_argument("--no-llm", action="store_true", help="해석 문단(LLM) 없이")
+    p.add_argument("--no-scan", action="store_true", help="스캐너 없이")
     a = p.parse_args()
     from ..monitoring import health, notify
+    from . import analyst, scanner
 
     df = compute()
     save(df)
     issues = health.check()
-    text = brief(df, health.report(issues))
+    text = brief(df)
+    scan_text = ""
+    if not a.no_scan:
+        try:
+            scan_text = scanner.summary(scanner.run())
+        except Exception as e:  # noqa: BLE001 — 스캐너 실패가 브리핑을 막지 않게
+            scan_text = f"■ 스캐너 실패: {type(e).__name__}: {e}"
+        text += "\n\n" + scan_text
+    if not a.no_llm:
+        note = analyst.commentary(df, text, scan_text)
+        text += "\n\n■ 해석 (market-analyst · LLM 참고용)\n" + (note or "  (생성 실패 — logs/llm_calls.jsonl 확인)")
+    hl = health.report(issues)
+    if hl:
+        text += "\n\n" + hl
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     (REPORT_DIR / f"{pd.Timestamp.now(tz='Asia/Seoul'):%Y-%m-%d}.md").write_text(text, encoding="utf-8")
     print(text)

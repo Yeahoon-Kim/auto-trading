@@ -39,6 +39,7 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 | `dart_disclosures` (symbol=ALL) | 전체 상장사 공시 목록 (접수번호, 종목, 보고서명, 제출인) | OpenDART | 2024~ (하루 1.5만 호출씩 백필) | 매일 |
 | `ecos` | 기준금리, 국고채 3·10년, 회사채 AA- 3년, CD 91일, 원/달러 | 한국은행 ECOS | 2005~ | 매일 |
 | `legacy/*.parquet` | 기존 stock-analysis-site DB에서 가져온 것: 일봉(KR 3,259·US 5,487종목, 2016-08~ +시가총액), 실제 지수 구성종목, 재무제표(K-IFRS 349사·US GAAP 511사, 2021~), 공시(SEC 1995~, DART 2024-08~), 내부자 거래(SEC Form 4 2000~) | Docker Postgres (1회 가져오기) | 표 참고 | 수동 (`collect legacy`) |
+| `scan_hits` (symbol=ALL) | 장 전 스캐너가 규칙에 맞았다고 표시한 종목 (시장·셋업·종가·20일 평균 거래대금) | 위 데이터에서 계산 | 2026-11-15~ (셋업 함수로 과거 재계산 가능) | 매일 08:00 |
 | `regime_1d` | **국면 지표** (시장정보팀이 계산, 매일 전체 재계산) | 위 데이터에서 계산 | 2015~ | 매일 08:00 |
 
 - 공통 컬럼: `ts`(봉 시작 시각, UTC), `open`, `high`, `low`, `close`, `volume`. 미완성 봉은 저장하지 않는다.
@@ -66,7 +67,8 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
 
 ```bash
 uv run python -m autotrader.data.cli health            # 신선도·오류·디스크 점검
-uv run python -m autotrader.intel.market               # 국면 지표 재계산 + 브리핑 출력
+uv run python -m autotrader.intel.market               # 국면 지표 + 스캐너 + LLM 해석, 브리핑 출력 (--no-llm, --no-scan)
+uv run python -m autotrader.intel.scanner              # 스캐너만 (reports/scan/날짜.json)
 ```
 
 - 작업 스케줄러: `autotrader-collect`(07:30, 17:00, 로그인), `autotrader-brief`(08:00), `autotrader-health`(12:00, 20:00)

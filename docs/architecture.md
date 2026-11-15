@@ -11,6 +11,10 @@
 | [day-trader-skill](https://github.com/Jakeschincariol/day-trader-skill) | Claude 스킬 11개: scanner → news → entry → exit → timemachine → budget → risk → broker | **파일 기반 인수인계**(plan.json, orders.json), **주문 관문은 하나**(risk PASS + 승인), 진입 전 과거 재현(timemachine), 알림 | 미국 전용·Yahoo 의존 구현 |
 | [TradingAgents](https://github.com/TauricResearch/TradingAgents) | 애널리스트팀(펀더멘털·심리·뉴스·기술) → 강세/약세 토론 → 트레이더 → 리스크팀 → PM 승인 | 역할 구성, **반대 의견 토론**(검증 담당 분리), 판단 근거 기록 | LLM 판단을 과거 백테스트로 검증하는 방식 (아래 3절) |
 | [TradingView MCP](https://github.com/atilaahmettaner/tradingview-mcp) | 스크리너·지표·멀티 타임프레임 분석 (KRX 포함, 비공식 스크래핑) | Claude가 대화 중에 시장을 훑어보는 **리서치 도구** | 시스템 데이터 소스 (비공식이라 언제든 깨질 수 있음) |
+| [trader-scanner](https://github.com/Jakeschincariol/day-trader-skill/tree/main/trader-scanner) (day-trader-skill) | 전 종목 일봉에 정해진 셋업(20일 돌파·불 플래그·20일선 회복·과매도·과매도 반등) + 장중 시가 범위 돌파 스캔, 유동성 필터, "규칙에 맞음 ≠ 매수" | 셋업 규칙과 유동성 필터를 **순수 함수**로 → 브리핑에 붙이고, 같은 함수를 lab 검증에 재사용. 매일 결과를 `scan_hits`로 기록 (`intel/scanner.py`) | Yahoo spark·Nasdaq 목록 의존 (우리는 `krx_1d`·`us_1d`·Binance 저장 데이터 사용), 장중 ORB 스캔(실시간 시세 생기면 추가) |
+| [trader-timemachine](https://github.com/Jakeschincariol/day-trader-skill/tree/main/trader-timemachine) (day-trader-skill) | 진입·손절·목표가 계획을 최근 60일의 같은 시각대 5분봉으로 10,000번 재현 + 같은 규칙의 실제 과거 기록, R 반영 판정 | 재현 방식 그대로(보수적 규칙: 같은 봉이면 손절, 갭도 -1R, 오늘 봉 제외, **시드 기록**), 손익분기 승률 1/(1+R) 기준 판정 (`backtest/replay.py`) | 화면용 ASCII 차트, Yahoo 직접 호출 |
+| [position-sizer](https://github.com/tradermonty/claude-trading-skills/tree/main/skills/position-sizer) (tradermonty) | 고정 비율·ATR·Kelly 사이징, 종목·섹터 비중 한도, "가장 엄한 한도가 이긴다", 내림만, 하프 Kelly, 전체 열린 위험 6~8% | 전부 결정론 코드로 (`risk/sizing.py`) + 우리 규칙 추가: 어떤 한도가 묶었는지 기록, 최소 주문 미달 BLOCK, 기대값 음수면 0, 선물 승수 | LLM이 사이징하는 대화형 흐름 |
+| [TradingAgents](https://github.com/TauricResearch/TradingAgents) v0.4~0.7 추가분 | 판단 기록(memory log)을 보유 기간 뒤 실제 가격으로 **채점(settle)**, 진입은 판단 후 첫 종가, 시점 무결성 계약, 모델 계층별 제공자, 보고서마다 실행 설정 기록 | 판단 기록·채점 (`llm/decision_log.py`), 모든 LLM 호출의 모델·프롬프트 해시 기록 (`llm/claude_cli.py`) | 채점 결과를 자동으로 다음 판단에 넣는 "반성" — lab마다 켤지 정한다 (넣으면 일관성 검사가 흔들림) |
 
 ## 2. 조직도
 
@@ -106,6 +110,7 @@
 - 강세/약세 토론: 결론 전에 반대 논거를 반드시 한 번 작성시킨다.
 - 모델 분리: 애널리스트는 빠르고 싼 모델, 최종 판단은 깊은 모델 (비용 통제).
 - 현재 보유 포지션을 입력에 포함한다 (보유 상태를 모르는 관점은 쓸 수 없음).
+- 판단은 전부 `llm/decision_log.py`에 남기고, 보유 기간이 지나면 판단 후 첫 종가 진입 기준으로 채점한다 (벤치마크 대비 alpha 포함). 이 표가 앞으로 검증의 기록이다.
 
 ## 8. 에이전트 구성
 
@@ -124,9 +129,10 @@ LLM 에이전트는 **판단·해석·검토**만 맡고, 숫자 계산과 주�
 
 **구현 형태**
 - 대화 중 역할(`quant-researcher`, `validator`)은 Claude Code 서브에이전트(`.claude/agents/*.md`)로 만든다.
-- 정해진 시각에 혼자 도는 역할(`market-analyst`, `ops-reporter`, `llm-desk`)은 사람이 없어도 실행돼야 한다. 그래서 둘 중 하나가 필요하다:
-  (a) Claude Code CLI를 설치해 `claude -p`로 실행 (구독 사용), 또는 (b) Anthropic API 키로 직접 호출 (사용량 과금, 구조화 출력이 쉬움).
-- 모든 LLM 호출은 입력·출력·모델 ID·프롬프트 버전을 기록한다 (7절 버전 관리).
+- 정해진 시각에 혼자 도는 역할(`market-analyst`, `ops-reporter`, `llm-desk`)은 **Claude Code CLI(`claude -p`)** 로 돌린다 (2026-11-15 결정: 구독 안에서, 추가 과금 없음).
+  `llm/claude_cli.py`가 도구 없이(`--tools ""`), 세션을 남기지 않고 호출하며, `--json-schema`로 구조화 출력도 받는다. 실패하면 None → 해당 기능만 빠지고 나머지는 그대로 돈다.
+- 모든 LLM 호출은 모델·프롬프트 해시·소요 시간·성공 여부를 `logs/llm_calls.jsonl`에 기록한다 (7절 버전 관리).
+- 서브에이전트 정의: `.claude/agents/{validator,quant-researcher,market-analyst,ops-reporter}.md`. validator의 "전략 코드 수정 불가"는 도구 목록(Write·Edit 없음)과 지침으로 막는다.
 
 ## 9. 보완 사항 (2026-11-14 점검)
 
@@ -142,5 +148,9 @@ LLM 에이전트는 **판단·해석·검토**만 맡고, 숫자 계산과 주�
 | 6 | 실전 초기 주문별 텔레그램 승인 모드 | day-trader-skill | `risk.yaml` `approval` | 📝 |
 | 7 | 최소 주문 금액 검사 (소액에서 주문이 0이 되는 문제) | Grok 팀 | `risk.yaml` `orders.min_notional_check` | 📝 |
 | 8 | LLM 판단의 애널리스트 분업·토론·모델 분리 | TradingAgents | 7절 | 📝 |
-| 9 | 오프라인 테스트 (샘플 데이터로 네트워크 없이) | day-trader-skill | `tests/test_core.py` | ✅ 핵심 로직 7개 |
-| 10 | 진입 직전 과거 유사 사례 확인 (선택) | day-trader-skill | 운용데스크 옵션 | 📝 |
+| 9 | 오프라인 테스트 (샘플 데이터로 네트워크 없이) | day-trader-skill | `tests/test_core.py` | ✅ 핵심 로직 13개 |
+| 10 | 진입 직전 과거 유사 사례 확인 (선택) | day-trader-skill | `backtest/replay.py` | ✅ |
+| 11 | 장 전 스캐너 (셋업 규칙 + 유동성 필터) | trader-scanner | `intel/scanner.py`, 08:00 브리핑 | ✅ |
+| 12 | 포지션 사이징 (가장 엄한 한도, 내림, 하프 Kelly, heat) | position-sizer | `risk/sizing.py`, `risk.yaml` `sizing` | ✅ (주문 경로 연결은 운용데스크 구현 때) |
+| 13 | LLM 판단 기록·사후 채점 | TradingAgents | `llm/decision_log.py` | ✅ (llm-desk 구현 때 사용) |
+| 14 | market-analyst 해석 문단 | — | `intel/analyst.py`, 08:00 브리핑 | ✅ |
