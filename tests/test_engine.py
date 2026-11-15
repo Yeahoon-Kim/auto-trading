@@ -429,3 +429,32 @@ def test_walk_forward_keeps_monthly_signal_dates():
     months = r.returns.index.to_period("M").unique()
     traded = r.turnover[r.turnover > 1e-9].index.to_period("M").unique()
     assert len(traded) >= len(months) - 1                         # 시험 구간 매달 리밸런싱
+
+
+# ── 워크포워드 이음매: 신호 날 기준 리밸런싱에서도 한 번에 돌린 결과와 같아야 함 ──
+@pytest.mark.parametrize("rebalance", ["on_signal", "on_change", "always"])
+def test_walk_forward_equals_single_run_for_sparse_rebalance(rebalance):
+    p = _rand_panel(n=1300, k=4)
+
+    class S:
+        @staticmethod
+        def generate_signals(data, params):          # 월초마다 20일 모멘텀 상위 2종목 동일가중
+            c = data.close
+            m = (c.index.to_series().dt.month.diff() != 0).to_numpy()
+            top = c.pct_change(20).rank(axis=1, ascending=False) <= 2
+            return (top.astype(float) / 2).loc[m]
+
+    costs = engine.Costs(fee_pct=0.1, tax_pct_sell=0.2)
+    out = engine.walk_forward(S, p, {}, costs, train="24M", test="6M", execution={"rebalance": rebalance})
+    t = out["test"]
+    r0, r1 = t.returns.index[0], t.returns.index[-1] + pd.Timedelta(days=1)
+    one = engine.run(p, S.generate_signals(p, {}), costs, start=r0, end=r1, rebalance=rebalance)
+    assert np.allclose(t.returns.to_numpy(), one.returns.to_numpy(), rtol=0, atol=1e-12)
+    assert t.turnover.iloc[0] == pytest.approx(one.turnover.iloc[0])   # 첫 봉 가짜 리밸런싱 없음
+
+
+def test_criterion2_fails_when_train_sharpe_not_positive():
+    from autotrader.backtest.lab import holds_up
+    assert holds_up(1.0, 1.5) and not holds_up(0.5, 1.5)
+    assert not holds_up(-0.3, -1.0)          # 예전에는 -0.3 ≥ -0.5라 통과했음
+    assert not holds_up(0.8, 0.0)

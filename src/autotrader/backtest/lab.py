@@ -107,6 +107,12 @@ def _portfolio_only(cfg: dict) -> None:
                          "(docs/architecture.md §10)")
 
 
+def holds_up(test_sharpe: float, train_sharpe: float) -> bool:
+    """고정 기준 2: 시험 Sharpe ≥ 학습 Sharpe × 0.5. 학습 Sharpe가 0 이하면 탈락
+    (그대로 두면 기준선이 음수가 돼 손실 전략도 통과한다)."""
+    return train_sharpe > 0 and test_sharpe >= 0.5 * train_sharpe
+
+
 def develop(lab_dir: Path, quick: bool = False) -> dict:
     cfg = yaml.safe_load((lab_dir / "lab.yaml").read_text(encoding="utf-8"))
     _portfolio_only(cfg)
@@ -153,8 +159,10 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
 
     checks = [
         {"no": 1, "rule": "시험 구간 Sharpe ≥ 1.0 (비용 포함)", "value": tm["sharpe"], "pass": tm["sharpe"] >= 1.0},
-        {"no": 2, "rule": "시험 Sharpe ≥ 학습 Sharpe × 0.5", "value": f"{tm['sharpe']:.2f} vs {train_sharpe:.2f}",
-         "pass": tm["sharpe"] >= 0.5 * train_sharpe},
+        # 학습 Sharpe가 0 이하면 "학습의 50%"가 음수가 돼 무엇이든 통과한다 → 학습에서 수익이 없으면 탈락
+        {"no": 2, "rule": "시험 Sharpe ≥ 학습 Sharpe × 0.5 (학습 Sharpe > 0일 때만)",
+         "value": f"{tm['sharpe']:.2f} vs {train_sharpe:.2f}" + (" (학습 Sharpe ≤ 0)" if train_sharpe <= 0 else ""),
+         "pass": holds_up(tm["sharpe"], train_sharpe)},
         {"no": 3, "rule": "파라미터 ±20%에서 Sharpe ≥ 0.5",
          "value": min((s["test_sharpe"] for s in sens), default=None),
          "pass": (min(s["test_sharpe"] for s in sens) >= 0.5) if sens else None},
