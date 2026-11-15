@@ -1,5 +1,8 @@
 """lab 실행기: lab.yaml + strategy.py → 워크포워드 백테스트와 고정 기준 1~5·7(자동분) 점검.
 
+type: portfolio (기본) → generate_signals(목표 비중)를 공용 엔진(engine.py)으로.
+type: trade           → generate_trades(진입 신호)를 데스크 재생기(trade.py)로 — 사이징·손절·목표가·당일 청산 포함.
+
     uv run python -m autotrader.backtest.lab labs/L001-이름              # 개발 구간 (잠금 구간 안 봄)
     uv run python -m autotrader.backtest.lab labs/L001-이름 --quick      # ±20% 민감도 생략 (개발 중 빠르게)
     uv run python -m autotrader.backtest.lab labs/L001-이름 --lockbox    # 최종 판정 때 단 한 번 (기준 6)
@@ -23,7 +26,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from . import benchmark, engine
+from . import benchmark, engine, trade
 from .data import Panel, dev_end, load
 
 REGIME_COL = {"kr_stock": "kospi_trend", "us_stock": "spx_trend",
@@ -93,18 +96,74 @@ def _bench(cfg: dict, panel: Panel, idx: pd.DatetimeIndex, costs: engine.Costs) 
 
 
 def _panel(cfg: dict, lockbox: bool) -> Panel:
+    fields = list(cfg.get("fields") or ())
+    if _kind(cfg) == "trade":            # 손절·목표가 판정에 고가·저가가 필요
+        fields += [f for f in ("high", "low") if f not in fields]
     return load(cfg["market"], cfg.get("universe") or None, start=cfg.get("data_start") or None,
-                timeframe=cfg.get("timeframe", "1d"), fields=tuple(cfg.get("fields") or ()),
+                timeframe=cfg.get("timeframe", "1d"), fields=tuple(fields),
                 lockbox=lockbox, currency=cfg.get("currency") or None,
                 dividend_tax=cfg.get("dividend_tax"))
 
 
-def _portfolio_only(cfg: dict) -> None:
-    """이 엔진은 비중형(type: portfolio)만 돌린다. 신호형(trade)은 데스크 재생 백테스트로 (2단계)."""
+def _kind(cfg: dict) -> str:
     kind = cfg.get("type") or "portfolio"
-    if kind != "portfolio":
-        raise SystemExit(f"type: {kind} — 공용 엔진은 비중형만 지원한다. 신호형 백테스트는 아직 구현 전 "
-                         "(docs/architecture.md §10)")
+    if kind not in ("portfolio", "trade"):
+        raise SystemExit(f"type: {kind} — portfolio(비중형) 또는 trade(신호형)만 있다 (docs/architecture.md §10)")
+    return kind
+
+
+class _Runner:
+    """비중형·신호형을 같은 모양으로 부른다: 워크포워드, 같은 신호로 비용만 바꾼 재실행, 미래참조 검사, 한 번 실행."""
+
+    def __init__(self, cfg: dict, strat, panel: Panel, costs: engine.Costs, lab: str):
+        self.kind, self.cfg, self.strat, self.panel, self.costs = _kind(cfg), cfg, strat, panel, costs
+        self.wf = cfg.get("walk_forward") or {}
+        self.fill = cfg.get("fill", "next_open")
+        self.ex = cfg.get("execution") or None
+        if self.kind == "trade":
+            if not hasattr(strat, "generate_trades"):
+                raise SystemExit("type: trade — strategy.py에 generate_trades(data, params)가 필요하다")
+            self.account = trade.Account.from_lab(cfg)
+            self.tkw = {"trade_cfg": cfg.get("trade") or None, "lab": lab}
+
+    def walk_forward(self, params: dict, costs: engine.Costs | None = None) -> dict:
+        c, wf = costs or self.costs, self.wf
+        a = (wf.get("start") or None, wf.get("train", "24M"), wf.get("test", "6M"))
+        if self.kind == "trade":
+            return trade.walk_forward(self.strat, self.panel, params, c, self.account, *a, **self.tkw)
+        return engine.walk_forward(self.strat, self.panel, params, c, self.fill, *a, execution=self.ex)
+
+    def rerun(self, base: dict, costs: engine.Costs, t0, t1) -> engine.Result:
+        """워크포워드로 만든 같은 신호를 비용만 바꿔 다시 (기준 4·참고용 비용 없음)."""
+        if self.kind == "trade":
+            return trade.run(self.panel, base["trades"], costs, self.account, start=t0, end=t1, **self.tkw)
+        kw = engine.execution_kw(self.ex, self.panel.index, t0, t1)
+        return engine.run(self.panel, base["weights"], costs, self.fill, start=t0, end=t1, **kw)
+
+    def causality(self, params: dict) -> dict:
+        if self.kind == "trade":
+            return trade.check_causality(self.strat.generate_trades, self.panel, params)
+        return engine.check_causality(self.strat.generate_signals, self.panel, params)
+
+    def once(self, params: dict, start) -> engine.Result:
+        if self.kind == "trade":
+            return trade.run(self.panel, self.strat.generate_trades(self.panel, params), self.costs, self.account,
+                             start=start, **self.tkw)
+        return engine.run(self.panel, self.strat.generate_signals(self.panel, params), self.costs, self.fill,
+                          start=start, **engine.execution_kw(self.ex, self.panel.index, start))
+
+    def extra(self, res: engine.Result) -> dict:
+        """신호형만: 사이징 값·계좌·거래 통계 (summary에 붙는다)."""
+        if self.kind != "trade":
+            return {}
+        from ..risk import guards
+        return {"type": "trade", "trade": guards.trade_params(self.cfg.get("trade"), guards.load_config()),
+                "account": engine.asdict(self.account), "trade_stats": trade.stats(res)}
+
+    def save(self, res: engine.Result, out: Path, name: str) -> None:
+        engine.save_result(res, out, name)
+        if self.kind == "trade":
+            trade.save_log(res, out, name)
 
 
 def holds_up(test_sharpe: float, train_sharpe: float) -> bool:
@@ -115,21 +174,18 @@ def holds_up(test_sharpe: float, train_sharpe: float) -> bool:
 
 def develop(lab_dir: Path, quick: bool = False) -> dict:
     cfg = yaml.safe_load((lab_dir / "lab.yaml").read_text(encoding="utf-8"))
-    _portfolio_only(cfg)
+    _kind(cfg)
     strat = load_strategy(lab_dir)
     params = cfg.get("params") or {}
-    wf = cfg.get("walk_forward") or {}
     fill = cfg.get("fill", "next_open")
     panel = _panel(cfg, lockbox=False)
     year = panel.bars_per_year
     costs = engine.Costs.from_config(cfg["market"], cfg.get("costs"))
     ex = cfg.get("execution") or None
+    R = _Runner(cfg, strat, panel, costs, str(cfg.get("id") or lab_dir.name))
+    wfrun = R.walk_forward
 
-    def wfrun(p, c=costs):
-        return engine.walk_forward(strat, panel, p, c, fill, wf.get("start") or None,
-                                   wf.get("train", "24M"), wf.get("test", "6M"), execution=ex)
-
-    causal = engine.check_causality(strat.generate_signals, panel, params)
+    causal = R.causality(params)
     base = wfrun(params)
     test = base["test"]
     rf = _rf(panel, test.returns.index)
@@ -143,9 +199,8 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
                          "test_return": float((1 + te).prod() - 1)})
     train_sharpe = float(np.mean([w["train_sharpe"] for w in win_rows]))
     t0, t1 = test.returns.index[0], test.returns.index[-1] + pd.Timedelta(days=1)
-    kw = engine.execution_kw(ex, panel.index, t0, t1)
-    no_cost = engine.run(panel, base["weights"], costs.scaled(0), fill, start=t0, end=t1, **kw)
-    cost2 = engine.run(panel, base["weights"], costs.scaled(2), fill, start=t0, end=t1, **kw)
+    no_cost = R.rerun(base, costs.scaled(0), t0, t1)
+    cost2 = R.rerun(base, costs.scaled(2), t0, t1)
 
     sens = []
     numeric = [k for k, v in params.items() if isinstance(v, (int, float)) and not isinstance(v, bool)]
@@ -186,17 +241,17 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
         "windows": win_rows, "sensitivity": sens, "causality": causal,
         "benchmark": _bench(cfg, panel, test.returns.index, costs),
         "regimes": _regimes(panel, test.returns, year) if panel.timeframe.endswith("d") else None,
-        "checks": checks, "trials": _trials(cfg),
+        "checks": checks, "trials": _trials(cfg), **R.extra(test),
     }
     out = lab_dir / "results" / datetime.now().strftime("%Y%m%d-%H%M%S")
-    engine.save_result(test, out, "test")
+    R.save(test, out, "test")
     _write(out, summary)
     return summary
 
 
 def open_lockbox(lab_dir: Path) -> dict:
     cfg = yaml.safe_load((lab_dir / "lab.yaml").read_text(encoding="utf-8"))
-    _portfolio_only(cfg)
+    _kind(cfg)
     lb = cfg.get("lockbox") or {}
     if lb.get("opened"):
         raise SystemExit(f"잠금 구간은 이미 열렸다 ({lb.get('start')}~{lb.get('end')}). "
@@ -207,7 +262,6 @@ def open_lockbox(lab_dir: Path) -> dict:
     dev = json.loads(last[-1].read_text(encoding="utf-8"))
     strat = load_strategy(lab_dir)
     params = cfg.get("params") or {}
-    fill = cfg.get("fill", "next_open")
     panel = _panel(cfg, lockbox=True)
     year = panel.bars_per_year
     cut = dev_end()
@@ -215,8 +269,8 @@ def open_lockbox(lab_dir: Path) -> dict:
     fit = getattr(strat, "fit", None)
     p = fit(panel.slice(end=cut), dict(params)) if fit else params
     ex = cfg.get("execution") or None
-    res = engine.run(panel, strat.generate_signals(panel, p), costs, fill, start=cut,
-                     **engine.execution_kw(ex, panel.index, cut))
+    R = _Runner(cfg, strat, panel, costs, str(cfg.get("id") or lab_dir.name))
+    res = R.once(p, cut)
     m = res.metrics(year, _rf(panel, res.returns.index))
     dev_mdd = dev["test"]["mdd"]
     ok = m["total_return"] >= 0 and abs(m["mdd"]) <= 1.5 * abs(dev_mdd)
@@ -228,10 +282,10 @@ def open_lockbox(lab_dir: Path) -> dict:
                "trials": _trials(cfg),
                "checks": [{"no": 6, "rule": "잠금 구간 수익 ≥ 0, MDD ≤ 개발 구간 MDD × 1.5",
                            "value": f"수익 {m['total_return']:.2%}, MDD {m['mdd']:.2%} (개발 {dev_mdd:.2%})",
-                           "pass": ok}]}
+                           "pass": ok}], **R.extra(res)}
     _mark_lockbox(lab_dir / "lab.yaml", str(cut.date()), panel.meta["end"][:10])
     out = lab_dir / "results" / (datetime.now().strftime("%Y%m%d-%H%M%S") + "_lockbox")
-    engine.save_result(res, out, "lockbox")
+    R.save(res, out, "lockbox")
     _write(out, summary)
     return summary
 
@@ -314,10 +368,12 @@ def report(s: dict) -> str:
               f"연 회전율 {_fmt(t.get('turnover_per_year'))}, 연 비용 {_fmt(t.get('cost_per_year'))}"]
     if s.get("money"):
         mo, e = s["money"], s.get("execution") or {}
-        cur = s["data"].get("currency") or ""
-        lines.append(f"- 금액 ({cur}, 초기 {e.get('capital') or 0:,}"
+        cur = s["data"].get("currency") or (s.get("account") or {}).get("currency") or ""
+        cap = e.get("capital") or (s.get("account") or {}).get("capital") or 0
+        lines.append(f"- 금액 ({cur}, 초기 {cap:,.0f}"
                      + (f", 월 적립 {e['monthly_contribution']:,}" if e.get("monthly_contribution") else "")
-                     + (", 정수 주식" if e.get("whole_shares") else "") + f", 리밸런싱 {e.get('rebalance', 'always')}): "
+                     + (", 정수 주식" if e.get("whole_shares") else "")
+                     + (", 신호형 재생" if s.get("type") == "trade" else f", 리밸런싱 {e.get('rebalance', 'always')}") + "): "
                      f"투입 {mo['invested']:,.0f} → 평가 {mo['value']:,.0f} (투입 대비 {mo['return_on_invested']:+.2%}, "
                      f"XIRR {_fmt(mo.get('xirr'))}, 남은 현금 {mo['cash_end']:,.0f})")
     if "test_no_cost" in s:
@@ -327,6 +383,20 @@ def report(s: dict) -> str:
         b = s["benchmark"]
         lines.append(f"- 벤치마크 {b['name']}: " + (b.get("error") or
                      f"Sharpe {_fmt(b['sharpe'])}, 총수익 {_fmt(b['total_return'])}, MDD {_fmt(b['mdd'])}"))
+    if s.get("trade_stats"):
+        ts, tp = s["trade_stats"], s.get("trade") or {}
+        lines += ["", "## 신호형 거래 (데스크 재생: make_plan → 체결 → check_position)",
+                  f"- 사이징: 거래당 위험 {tp.get('risk_per_trade_pct')}%, heat {tp.get('max_heat_pct')}%, "
+                  f"종목 비중 {tp.get('max_position_pct')}%, 보유 종목 {tp.get('max_open_positions')}개 "
+                  "(같은 봉 손절·목표가 동시 도달은 손절로 처리)",
+                  f"- 청산 {ts['closed']}건 (끝에 보유 {ts['open_at_end']}건): 승률 {_fmt(ts.get('win_rate'))}, "
+                  f"평균 R {_fmt(ts.get('avg_r'))}, 손익비 {_fmt(ts.get('payoff'))}, 평균 보유 {_fmt(ts.get('avg_hold_bars'))}봉"]
+        if ts.get("exit_kinds"):
+            lines.append("- 청산 종류: " + ", ".join(f"{k} {v}" for k, v in ts["exit_kinds"].items()))
+        if ts.get("binding"):
+            lines.append("- 수량을 묶은 한도: " + ", ".join(f"{k} {v}" for k, v in ts["binding"].items()))
+        if ts.get("blocked"):
+            lines.append("- 진입 못 한 신호: " + ", ".join(f"{k} {v}" for k, v in ts["blocked"].items()))
     lines += ["", "## 고정 기준", "| # | 기준 | 값 | 통과 |", "|---|---|---|---|"]
     for c in s["checks"]:
         p = {True: "✅", False: "❌", None: "미확인"}[c["pass"]]

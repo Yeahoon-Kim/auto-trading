@@ -5,7 +5,9 @@ status: draft            # draft | backtesting | validating | validated | reject
 category: classic        # classic | intraday | algo | arbitrage | llm  (연구 분류)
 type: portfolio          # 실행 유형 (docs/architecture.md §10). 비우면 portfolio
                          #   portfolio: generate_signals()가 날짜×종목 목표 비중을 낸다. 비중이 곧 사이징 (종목 수·비중은 전략이 정함)
-                         #   trade:     진입 신호(손절가 포함)를 내고 사이징·손절·당일 청산을 아래 trade 블록으로 (2단계, 아직 실행 안 됨)
+                         #   trade:     generate_trades()가 진입 신호(손절가·목표가·당일 청산)를 낸다. 사이징은 아래 trade 블록,
+                         #              손절·목표가·장 마감 전 청산은 데스크와 같은 코드로 재생 (backtest/trade.py, 고가·저가 자동 로드)
+                         #              자본은 execution.capital, 원화 아닌 계좌는 paper.krw_per_unit 필요. fill·rebalance는 안 씀
 
 trade:                   # type: trade 일 때만. 비우면 config/risk.yaml trade.defaults, 상한(caps)은 넘을 수 없음
   risk_per_trade_pct:    # 거래당 위험 (손절까지 잃는 돈 / 총자산 %)
