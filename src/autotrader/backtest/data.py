@@ -523,7 +523,10 @@ def dividends(market: str, symbols=None, asof=None) -> pd.DataFrame:
         dv = dv[dv["has_data"].astype(bool)]
         if "reprt_code" in dv:
             dv = dv[dv["reprt_code"] == "11011"]
-        dv = dv.assign(symbol=dv["symbol"].str.strip(), dps=_dps_or_zero(dv, dv["dps_common"]))
+        dps = _dps_or_zero(dv, dv["dps_common"])
+        if "dps_pref" in dv:   # 우선주·종류주식에만 배당하고 보통주 칸이 "-"인 회사 → 보통주는 무배당
+            dps = dps.where(dps.notna() | dv["dps_pref"].isna(), 0.0)
+        dv = dv.assign(symbol=dv["symbol"].str.strip(), dps=dps)
         dv = pd.concat([dv, _kr_pref_rows(dv)], ignore_index=True)
         if symbols not in (None, "ALL", "KOSPI", "KOSDAQ"):
             dv = dv[dv["symbol"].isin([symbols] if isinstance(symbols, str) else symbols)]

@@ -125,6 +125,11 @@ def test_kr_dps_parse_gap_is_unknown_not_zero(tmp_store):
 
     dart(14.3)
     assert _kr(fields=("dps",)).dps["900001"].isna().all()
+    store.write("dart_dividend", "ALL", pd.DataFrame({                 # 우선주에만 배당 → 보통주는 0
+        "corp_code": ["00999999"], "bsns_year": [2023], "reprt_code": ["11011"], "ts": [_kst("2023-12-31")],
+        "symbol": ["900001"], "filed": [_kst("2025-01-10")], "has_data": [True], "dps_common": [np.nan],
+        "payout_ratio": [14.3], "dps_pref": [100.0]}), key=["corp_code", "bsns_year", "reprt_code"])
+    assert _kr(fields=("dps",)).dps["900001"].loc["2024-03-14"] == 0.0
     dart(np.nan)
     assert _kr(fields=("dps",)).dps["900001"].loc["2024-03-14"] == 0.0
 
