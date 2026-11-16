@@ -1,7 +1,7 @@
 """신호형(type: trade) 백테스트: 데스크 처리 코드를 과거 봉으로 재생한다 (docs/architecture.md §10).
 
 lab의 strategy.py는 generate_trades(data, params)로 '봉 t 종가까지 보고 낸 진입 신호' 목록을 돌려준다.
-재생기는 데스크와 같은 코드로 처리한다.
+재생기는 데스크와 같은 코드로 처리한다 — 봉 처리 규칙은 execution/trade_desk.py에 있고 paper 데스크도 그것을 쓴다.
     신호 → risk.guards.make_plan (가드 + sizing.size, 값은 lab.yaml trade 블록) → 봉 t+1 체결
     보유 포지션 → risk.guards.check_position (손절·목표가·장 마감 전 청산)을 봉의 시가·저가·고가·종가로
 
@@ -47,15 +47,14 @@ lab의 strategy.py는 generate_trades(data, params)로 '봉 t 종가까지 보�
 from __future__ import annotations
 
 import copy
-import re
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 import yaml
 
-from ..core.schemas import Position, Signal
 from ..data import store
+from ..execution import trade_desk as desk
 from ..risk import guards
 from . import engine
 from .data import Panel
@@ -133,27 +132,20 @@ def normalize(trades, panel: Panel) -> pd.DataFrame:
     return df[list(COLS)].sort_values(["ts", "symbol"], kind="stable").reset_index(drop=True)
 
 
-def _aware(t: pd.Timestamp) -> pd.Timestamp:
-    return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
-
-
-def _bar_len(panel: Panel) -> pd.Timedelta:
-    tf = panel.timeframe
-    n = int(tf[:-1] or 1)
-    return {"d": pd.Timedelta(days=n), "h": pd.Timedelta(hours=n), "m": pd.Timedelta(minutes=n)}[tf[-1]]
-
-
 def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None, end=None,
         trade_cfg: dict | None = None, risk_cfg: dict | None = None, lab: str = "lab") -> engine.Result:
     """신호표를 [start, end) 구간에서 재생한다. start 이전 판단 봉의 신호는 버린다
     (start 봉 체결에는 start 직전 봉의 신호를 쓴다). 반환: 공용 엔진과 같은 Result
-    (meta["trade_log"]: 거래 기록, meta["blocked"]: 차단 사유별 건수)."""
+    (meta["trade_log"]: 거래 기록, meta["blocked"]: 차단 사유별 건수).
+    봉 처리 규칙은 execution/trade_desk.py (paper 데스크와 같은 코드). 여기서는 과거 봉을 넘겨주고
+    상장폐지(마지막 가격 다음 봉 강제 청산)와 수익률 집계만 한다."""
     for f in ("open", "high", "low", "close"):
         if f not in panel:
             raise ValueError(f"신호형 백테스트에는 {f}가 필요하다 (lab.yaml fields에 high, low)")
-    if account.currency != "KRW" and not account.krw_per_unit:
-        # make_plan이 신호마다 ValueError를 내 전부 "신호 오류"로 조용히 막히는 것을 막는다
-        raise ValueError(f"계좌 통화 {account.currency}: lab.yaml paper.krw_per_unit이 필요하다 (주문 상한 환산용)")
+    spec = desk.DeskSpec(lab=lab, market=panel.market, currency=account.currency,
+                         krw_per_unit=account.krw_per_unit, lot=account.lot, min_notional=account.min_notional,
+                         multiplier=account.multiplier, trade_cfg=trade_cfg)
+    spec.check()
     rcfg = backtest_risk_cfg(risk_cfg)
     sig = normalize(trades, panel)
     idx = panel.index
@@ -170,7 +162,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
     last = np.where(valid.any(0), n - 1 - np.argmax(valid[::-1], axis=0), -1) if syms else np.array([], int)
     tax_t = costs.tax_rates(idx)
     fee = costs.per_trade
-    blen = _bar_len(panel)
+    blen = desk.bar_length(panel.timeframe)
     day = idx.normalize()
     day_last = day.searchsorted(day, side="right") - 1   # 봉마다 그날 마지막 봉 위치
     sig_pos = idx.searchsorted(pd.DatetimeIndex(sig["ts"])) if len(sig) else np.array([], int)
@@ -179,131 +171,38 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
         if lo - 1 <= i < hi - 1:                       # 체결 봉(i+1)이 구간 안
             by_bar.setdefault(int(i), []).append(row)
 
-    cash = account.capital
-    pos: dict[str, dict] = {}          # symbol → {position, j, entry_bar, risk, cost_in}
-    pending: list[dict] = []           # 다음 봉 체결 대기 Plan
-    blocked: dict[str, int] = {}
-    log: list[dict] = []
+    book = desk.TradeBook(cash=account.capital)
     m = account.multiplier
     out_n = hi - lo
     net, gross, cost_s, turn_s, eq_s = (np.zeros(out_n) for _ in range(5))
     held = np.zeros((out_n, len(syms)))
     trades_n = forced = 0
 
-    def value(t):
-        return cash + sum(_sgn(p["position"].side) * p["position"].qty * m * Cf[t, p["j"]] for p in pos.values())
+    def V_at(t):
+        return desk.value(book, spec, lambda s: Cf[t, col[s]])
 
-    def block(why):
-        # 사이징 차단은 어떤 한도인지까지 (숫자만 지움), 나머지는 사유 앞부분으로 묶는다
-        k = re.sub(r"\d[\d,.]*", "N", why)[:60] if why.startswith("사이징") else why.split(":")[0].split(" (")[0][:40]
-        blocked[k] = blocked.get(k, 0) + 1
-
-    def close_pos(s, t, price, kind, reason):
-        nonlocal cash
-        p = pos.pop(s)
-        P = p["position"]
-        notional = P.qty * m * price
-        c = notional * fee + (notional * tax_t[t] if P.side == "long" else 0.0)
-        cash += _sgn(P.side) * notional - c
-        pnl = _sgn(P.side) * P.qty * m * (price - P.entry) - p["cost_in"] - c
-        log.append({"symbol": s, "side": P.side, "signal_ts": p["signal_ts"], "entry_ts": idx[p["entry_bar"]],
-                    "exit_ts": idx[t], "entry": P.entry, "exit": price, "stop": P.stop, "target": P.target,
-                    "qty": P.qty, "intraday": P.intraday, "exit_kind": kind, "exit_reason": reason,
-                    "cost": p["cost_in"] + c, "pnl": pnl, "r": pnl / p["risk"] if p["risk"] > 0 else np.nan,
-                    "binding": p["binding"]})
-        return notional, c
-
-    prev_v = value(max(lo, 1) - 1) if lo > 0 else cash
+    prev_v = V_at(max(lo, 1) - 1) if lo > 0 else book.cash
     for t in range(max(lo, 1) - 1, hi):
         traded = tcost = 0.0
-        bar_open = _aware(idx[t])
-        bar_end = bar_open + blen
-        day_close = _aware(idx[day_last[t]]) + blen          # 그날 장 마감 시각 (마지막 봉의 끝)
+        bar_open, bar_end, day_close = desk.bar_times(idx[t], idx[day_last[t]], blen)
         if t >= lo:
-            # 1) 보유 포지션 청산 판정
-            for s in list(pos):
-                p = pos[s]
-                j, P = p["j"], p["position"]
-                if last[j] < t:                                   # 상장폐지 → 마지막 종가에 청산
-                    a, c = close_pos(s, t, float(C[last[j], j]), "delisted", "상장폐지: 마지막 가격에 강제 청산")
-                    traded, tcost, forced = traded + a, tcost + c, forced + 1
-                    continue
-                if np.isnan(C[t, j]) or not TR[t, j]:          # 가격 없음·거래 없는 날 → 판정 보류
-                    continue
-                ex = _exit(P, O[t, j], H[t, j], L[t, j], C[t, j], bar_open, bar_end, day_close,
-                           rcfg, allow_target=True, check_open=True)
-                if ex:
-                    a, c = close_pos(s, t, *ex)
-                    traded, tcost = traded + a, tcost + c
-            # 2) 직전 봉에 만든 계획 체결
-            for pl in pending:
-                s, j = pl["plan"].symbol, col[pl["plan"].symbol]
-                P0 = pl["plan"]
-                o, h, l, c_ = O[t, j], H[t, j], L[t, j], C[t, j]
-                if np.isnan(o) or np.isnan(c_) or not TR[t, j]:
-                    block("미체결: 체결 봉 가격 없음")
-                    continue
-                long = P0.side == "long"
-                if pl["limit"] is None:
-                    fill, at_open = float(o), True
-                elif (long and l <= pl["limit"]) or (not long and h >= pl["limit"]):
-                    at_open = (long and o <= pl["limit"]) or (not long and o >= pl["limit"])
-                    fill = float(o) if at_open else float(pl["limit"])
-                else:
-                    block("미체결: 지정가 안 닿음")
-                    continue
-                notional = P0.qty * m * fill
-                cin = notional * fee
-                cash -= _sgn(P0.side) * notional + cin
-                traded, tcost, trades_n = traded + notional, tcost + cin, trades_n + 1
-                P = Position(lab=P0.lab, symbol=s, market=P0.market, side=P0.side, qty=P0.qty, entry=fill,
-                             stop=P0.stop, target=P0.target, intraday=P0.intraday, opened_ts=bar_open.to_pydatetime())
-                pos[s] = {"position": P, "j": j, "entry_bar": t, "cost_in": cin, "signal_ts": pl["signal_ts"],
-                          "risk": P.qty * m * abs(fill - P.stop) if P.stop is not None else np.nan,
-                          "binding": P0.sizing.binding if P0.sizing else None}
-                # 체결 봉 안에서도 손절·(시가 체결이면) 목표가·당일 청산 판정
-                ex = _exit(P, o, h, l, c_, bar_open, bar_end, day_close, rcfg,
-                           allow_target=at_open, check_open=at_open)
-                if ex:
-                    a, c = close_pos(s, t, *ex)
-                    traded, tcost = traded + a, tcost + c
-            pending = []
-        # 3) 이 봉 종가 평가 → 이 봉 신호로 다음 봉 계획 (판단 시각 = 봉 끝)
-        V = value(t)
-        rows = by_bar.get(t, [])
-        if rows:
-            now = bar_end.to_pydatetime()
-            heat = sum(p["risk"] for p in pos.values() if np.isfinite(p["risk"])) / V * 100 if V > 0 else 0.0
-            heat += sum(pl["risk_pct"] for pl in pending)
-            busy = set(pos) | {pl["plan"].symbol for pl in pending}
-            for r in rows:
-                if r.symbol in busy:
-                    block("이미 보유 중인 종목")
-                    continue
-                ref = float(r.entry) if np.isfinite(r.entry) else Cf[t, col[r.symbol]]
-                if not np.isfinite(ref) or ref <= 0:
-                    block("판단 봉 가격 없음")
-                    continue
-                sgl = Signal(lab=lab, symbol=r.symbol, market=panel.market, side=r.side, price=ref,
-                             reason=r.reason, ts=now, quote_ts=now,
-                             stop=float(r.stop) if np.isfinite(r.stop) else None,
-                             atr=float(r.atr) if np.isfinite(r.atr) else None,
-                             target=float(r.target) if np.isfinite(r.target) else None, intraday=bool(r.intraday))
-                acct = guards.Account(equity=V, currency=account.currency, krw_per_unit=account.krw_per_unit,
-                                      open_heat_pct=heat, open_positions=len(pos) + len(pending))
-                try:
-                    plan = guards.make_plan(sgl, acct, now, rcfg, trade=trade_cfg, lot=account.lot,
-                                            multiplier=m, min_notional=account.min_notional)
-                except ValueError as e:
-                    block(f"신호 오류: {e}")
-                    continue
-                if not plan.approved:
-                    block(plan.blocked or "차단")
-                    continue
-                pending.append({"plan": plan, "limit": float(r.entry) if np.isfinite(r.entry) else None,
-                                "signal_ts": idx[t], "risk_pct": plan.sizing.risk_pct})
-                busy.add(r.symbol)
-                heat += plan.sizing.risk_pct
+            # 상장폐지 → 마지막 종가에 청산 (미래 데이터로 아는 것이라 백테스트에서만)
+            for s in [s for s in book.positions if last[col[s]] < t]:
+                a, c = desk.close(book, spec, s, idx[t], float(C[last[col[s]], col[s]]), "delisted",
+                                  "상장폐지: 마지막 가격에 강제 청산", fee, tax_t[t])
+                traded, tcost, forced = traded + a, tcost + c, forced + 1
+
+            def quote(s, t=t):
+                j = col[s]
+                return O[t, j], H[t, j], L[t, j], C[t, j], bool(TR[t, j])
+
+            a, c = desk.manage(book, spec, quote, idx[t], bar_open, bar_end, day_close, fee, tax_t[t], rcfg)
+            traded, tcost = traded + a, tcost + c
+            a, c, k = desk.fill(book, spec, quote, idx[t], bar_open, bar_end, day_close, fee, tax_t[t], rcfg)
+            traded, tcost, trades_n = traded + a, tcost + c, trades_n + k
+        V = V_at(t)
+        desk.plan(book, spec, by_bar.get(t, []), V, lambda s, t=t: Cf[t, col[s]], idx[t],
+                  bar_end.to_pydatetime(), rcfg)
         if t >= lo:
             i = t - lo
             base = prev_v if abs(prev_v) > 1e-12 else 1.0
@@ -311,56 +210,24 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
             cost_s[i], turn_s[i] = tcost / base, traded / base
             gross[i] = (V + tcost) / base - 1
             eq_s[i] = V
-            for s, p in pos.items():
-                held[i, p["j"]] = _sgn(p["position"].side) * p["position"].qty * m * Cf[t, p["j"]] / V
+            for s, p in book.positions.items():
+                held[i, col[s]] = desk.sgn(p["side"]) * p["qty"] * m * Cf[t, col[s]] / V
         prev_v = V
 
     sl = idx[lo:hi]
     first = 1 if lo == 0 else 0
-    tl = pd.DataFrame(log)
-    open_rows = [{"symbol": s, "side": p["position"].side, "signal_ts": p["signal_ts"], "entry_ts": idx[p["entry_bar"]],
-                  "entry": p["position"].entry, "stop": p["position"].stop, "target": p["position"].target,
-                  "qty": p["position"].qty, "intraday": p["position"].intraday, "exit_kind": "open",
-                  "cost": p["cost_in"], "binding": p["binding"]} for s, p in pos.items()]
-    if open_rows:
-        tl = pd.concat([tl, pd.DataFrame(open_rows)], ignore_index=True)
+    tl = pd.DataFrame(book.closed)
+    rows = desk.open_rows(book)
+    if rows:
+        tl = pd.concat([tl, pd.DataFrame(rows)], ignore_index=True)
     res = engine.Result(
         returns=pd.Series(net, sl).iloc[first:], gross=pd.Series(gross, sl).iloc[first:],
         cost=pd.Series(cost_s, sl).iloc[first:], turnover=pd.Series(turn_s, sl).iloc[first:],
         weights=pd.DataFrame(held, sl, syms).iloc[first:], trades=trades_n, forced_exits=forced, costs=costs,
-        meta={"type": "trade", "trade_log": tl, "blocked": blocked})
+        meta={"type": "trade", "trade_log": tl, "blocked": book.blocked})
     res.equity = pd.Series(eq_s, sl).iloc[first:]
     res.invested = pd.Series(account.capital, sl).iloc[first:]
     return res
-
-
-def _sgn(side: str) -> int:
-    return 1 if side == "long" else -1
-
-
-def _exit(P: Position, o, h, l, c, bar_open, bar_end, day_close, cfg, *, allow_target: bool, check_open: bool):
-    """한 봉 안의 청산 판정 (guards.check_position을 시가 → 불리한 극값 → 유리한 극값 → 종가 순으로).
-    반환: (가격, kind, 사유) 또는 None. 같은 봉에서 손절·목표가 둘 다면 손절 (불리한 극값을 먼저 본다)."""
-    long = P.side == "long"
-    now0 = bar_open.to_pydatetime()
-    if check_open and np.isfinite(o):
-        d = guards.check_position(P, float(o), now0, cfg)
-        if d and d.kind in ("stop_loss", "take_profit") and (allow_target or d.kind == "stop_loss"):
-            return float(o), d.kind, d.reason + " (시가 갭)"
-    adverse, favorable = (l, h) if long else (h, l)
-    if np.isfinite(adverse):
-        d = guards.check_position(P, float(adverse), now0, cfg)
-        if d and d.kind == "stop_loss":
-            return float(P.stop), d.kind, d.reason
-    if allow_target and np.isfinite(favorable):
-        d = guards.check_position(P, float(favorable), now0, cfg)
-        if d and d.kind == "take_profit":
-            return float(P.target), d.kind, d.reason
-    if P.intraday and day_close is not None and np.isfinite(c):
-        d = guards.check_position(P, float(c), bar_end.to_pydatetime(), cfg, close_at=day_close.to_pydatetime())
-        if d and d.kind == "flat_before_close":
-            return float(c), d.kind, d.reason
-    return None
 
 
 # ── 미래참조 자동 검사 ──
