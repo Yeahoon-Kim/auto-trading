@@ -56,9 +56,13 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 | `krx_1d` (symbol=ALL) | KOSPI·KOSDAQ **전 종목** 원본 일봉 + 시가총액 + 상장주식수 (그날 상장 종목 전부 → 생존편향 없음) | KRX Open API | 2010~ | 매일 (KRX는 다음 영업일 공개) |
 | `dart_disclosures` (symbol=ALL) | 전체 상장사 공시 목록 (접수번호, 종목, 보고서명, 제출인) | OpenDART | 2024~ (하루 1.5만 호출씩 백필) | 매일 |
 | `dart_fin` (symbol=ALL) | 상장사 **주요계정 재무**: 매출·영업이익·세전이익·순이익·총포괄손익(3개월 값 + `_cum` 누적), 유동·비유동 자산·부채, 자본금·이익잉여금·자본총계. 연결 우선, 없으면 별도. `filed` = 실제 접수일 | OpenDART `fnlttMultiAcnt` | 2015~, 2015년 이후 KRX 상장 종목(상장폐지 포함 중 DART 매핑되는 것) | 매일 (최근 2개 사업연도 재수집) |
+| `dart_fin` 지배주주 순이익 열 | `net_income_controlling`(3개월 값, 사업보고서는 연간) + `_cum`(누적) + `nic_source`. 지주사처럼 비지배지분이 큰 회사의 EPS용. 연결은 아래 `dart_fin_owner` 값, 별도는 `net_income` 그대로 (방침은 아래 한계 참고). 매 `kr-public` 실행 끝에 전체 `dart_fin`에 다시 붙인다 | OpenDART `fnlttSinglAcntAll` | `dart_fin`과 같음 | 매일 |
+| `dart_fin_owner` (symbol=ALL) | 연결(CFS) 보고서별 지배주주 순이익 원본: `fin_rcept_no`(받을 때의 `dart_fin` 접수번호), `rcept_no`(응답), `status`, `has_data`, `source`, 값 2개. 키 = (symbol, bsns_year, reprt_code). `dart_fin` 보고서가 정정돼 접수번호가 바뀌면 다시 받는다 | OpenDART `fnlttSinglAcntAll` (회사·보고서당 1회) | `dart_fin` 연결 행 약 7.9만 건 | 매일 (실행당 `kr_public.dart_owner_max_calls` 8천 호출씩 백필, 최근 사업연도부터) |
 | `dart_dividend` (symbol=ALL) | 사업보고서 **배당에 관한 사항**: 주당 현금배당금(`dps_common`·`dps_pref`, 원, 중간·분기배당 포함 연간 합계), 현금배당수익률(%), 현금배당성향(%), 현금·주식배당 총액(백만원), 주당 주식배당, 순이익·EPS(연결 우선). 회사·사업연도당 1행, 배당 기록 없음은 `has_data=False`. `ts` = 결산일, `filed` = 접수일 | OpenDART `alotMatter` | 사업연도 2015~, `dart_fin`과 같은 종목(상장폐지 포함) | 매일 (실행당 8천 호출씩 백필 → 이후 새 사업보고서만) |
 | `kr_dividend_schedule` (symbol=ALL) | KR **배당 기준일·배당락일**: `ts` = 기준일, `ex_date` = 배당락일(KRX 거래일로 계산: 기준일 이하 마지막 거래일의 전 거래일), `dps`(주당 현금배당금, 원), `kind`(결산·중간·분기), `stock_kind`(보통·우선), `divi_rate`(액면 대비 %), 주식배당률, `pay_date`. 공시일 없음 → 배당락 가격 보정(총수익)용 | KIS 예탁원정보 배당일정 (`HHKDB669102C0`) | 2010년 이후 KRX 상장 종목(상장폐지 포함), 기준일 2010~ (1년 앞 발표분까지) | 매일 (상장 종목은 7일마다 재조회) |
 | `dart_periodic_filings` (symbol=ALL) | 2015~2023 정기보고서(사업·반기·분기) 목록, 정정 포함: `ts`(접수일), `rcept_no`, `kind`, `period`('YYYY.MM'), `correction`. 2024~는 `dart_disclosures`에 있다. `dividends.first_filed()`가 둘을 합쳐 최초 접수일을 준다 | OpenDART 공시 목록 (회사별) | `dart_fin`과 같은 종목 | 회사당 1회 |
+| `edgar_facts` (symbol=ALL) | 미국 **재무 사실(fact) 긴 표**: `field`(eps_diluted·eps_basic·net_income·revenue·operating_income·equity·shares_outstanding·shares_diluted_wavg), `tag`·`tag_rank`(같은 항목의 us-gaap 태그 우선순위), `unit`, `start`(기간 시작, 시점 항목은 NaT)·`end`, `val`, `accn`(접수번호), `fy`·`fp`, `form`(10-K·10-Q·10-K/A·8-K…), **`filed`(공시일)**, `frame`. `ts` = 기간 끝. 같은 기간 값이 다음 공시(비교 재무제표·정정)에 다시 나오면 공시마다 행이 따로 있다 | SEC EDGAR XBRL companyfacts (키 없음, **`SEC_USER_AGENT` 필요**) | us_1d 유니버스(S&P500+NASDAQ100 **현재 구성종목**), XBRL 2009~ (그 전 기간은 이후 공시의 비교 값만) | 매일 (SEC 일별 색인에서 10-K·10-Q(정정 포함)를 낸 회사 + 30일 지난 회사만 다시 받음) |
+| `edgar_companies` (symbol=ALL) | 종목 → CIK(SEC `company_tickers.json`), 회사명, 마지막 companyfacts 수집 시각(`ts`), 사실 수 | SEC | 같음 | 매일 |
 | `us_dividends` (symbol=ALL) | 미국 **현금·주식배당**: `ts` = 배당락일, `rate`(주당 금액, 원본·분할 미반영), `record_date`, `payable_date`, `special`, `foreign`, `cusip`. ETF·펀드 포함 | Alpaca corporate actions v1 (키 필요) | **시장 전체**(상장폐지 포함), 배당락 2016~ | 매일 (최근 150일 + 발표된 90일 앞까지 재수집) |
 | `us_dividend_announcements` (symbol=ALL) | 미국 배당 발표 기록: `ts` = Alpaca `declaration_date` (**실제 결의일이 아님**, 아래 한계 참고), `cash`, `ex_date`, `record_date`, `payable_date`, `sub_type` | Alpaca corporate action announcements v2 (키 필요) | 시장 전체(2020~21은 뮤추얼펀드 다수), 2020~ | 매일 (최근 30일 재수집) |
 | `news` (symbol=ALL) | 미국 주식·코인 뉴스 (Benzinga): `id`, `ts`(기사 작성 시각), `updated_at`, `symbols`(쉼표로 이은 티커, 코인은 `BTCUSD`), `headline`, `summary`, `source`, `url`. 본문 없음 | Alpaca News API 무료 플랜 (키 필요) | 2015-01~ | 매일 |
@@ -86,6 +90,19 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   - 4분기: 국내에는 4분기 보고서가 없다. 4분기는 `FY − Q3의 _cum`으로 계산하고, 알 수 있는 시점은 사업보고서 접수일이다. 4분기 잠정실적은 공시 목록의 "영업(잠정)실적"이 더 빠르다.
   - 정정: DART는 최신(정정) 값을 준다. 정정된 보고서는 `filed`가 정정일이라 시점은 보수적이다. 다만 정정 전 원래 값은 남지 않는다.
   - 업종: 금융업은 계정이 달라 매출액·영업이익이 비는 경우가 있다 (영업수익 등).
+  - **지배주주 순이익** (`net_income_controlling`, `nic_source`):
+    - `net_income`은 연결 당기순이익 전체(비지배지분 몫 포함)다. 주요계정 API(`fnlttMultiAcnt`)에는 지배주주 항목이 없어(당기순이익 2행 모두 전체) 단일회사 전체 재무제표(`fnlttSinglAcntAll`)에서 따로 받는다. 예: SK 2024 반기 3개월 전체 4,541억 중 지배 1,810억.
+    - `cfs`: 연결 재무제표의 "지배기업 소유주 귀속 당기순이익" (표준 계정 ID, 없으면 계정명. 포괄이익 지배분은 쓰지 않는다).
+    - `cfs_signfix`: 지배 + 비지배 ≠ 전체인데 지배 값의 부호를 바꾸면 맞는 경우 (제출 오류 보정).
+    - `cfs_no_nci`: 연결인데 지배·비지배 구분 행이 아예 없음 → 비지배지분이 없다고 보고 당기순이익 전체.
+    - **`ofs`: 별도재무제표만 있는 회사는 지배주주 순이익 = 당기순이익으로 둔다.** 별도만 낸다는 건 연결할 종속회사가 없다는 뜻이라 비지배지분이 생기지 않는다. 엔진에서 엄격하게 쓰려면 `nic_source == 'ofs'`를 걸러 NaN으로 바꾸면 된다.
+    - `cfs_missing`: 연결인데 지배주주 순이익을 못 찾았거나(포괄이익만 나눈 회사 등) 아직 백필 전 → NaN. 표본 62건(2015~2026 무작위) 중 2건(3%).
+    - 시점·4분기·정정 규칙은 다른 `dart_fin` 열과 같다 (`filed`, 4분기 = FY − Q3 `_cum`). 연결 보고서는 `dart_fin`과 같은 접수번호로 받은 값만 붙이고, 정정으로 접수번호가 바뀌면 다시 받을 때까지 NaN.
+    - `fnlttSinglAcntAll`의 2015 분기·반기는 비어 있는 경우가 많다 (삼성전자 2015 3분기 013). 2015 사업보고서는 있다.
+    - 금융지주·은행(예: 105560, 055550)은 `fnlttMultiAcnt`에 없어 `dart_fin`에 행이 없고, 따라서 지배주주 순이익도 없다.
+  - **EPS용 주식수** (수집 안 함, 확인만):
+    - `krx_1d.shares`는 종목코드별 상장주식수라 보통주(코드 끝 0)·우선주(끝 5·7 등)가 따로 있다. 자기주식을 빼지 않은 값이다.
+    - 자기주식: OpenDART `stockTotqySttus`(주식의 총수: 발행·자기주식·유통주식수, 보통·우선 구분)와 `tesstkAcqsDspsSttus`(자기주식 취득·처분 현황)가 정기보고서마다 있다. 다만 초기 연도는 비어 있다 (삼성전자 2015 사업보고서는 두 API 모두 '-'). 회사·보고서당 1회라 백필하면 약 12만 호출(하루 2회 × 8천 기준 약 8일). 필요하면 개발·점검 HQ가 정한다.
 - **배당 데이터 시점** (검토: `docs/research/2026-11-16-dividend-data-sources.md`):
   - `dart_dividend`: DART가 최신(정정) 보고서를 주므로 `filed`가 정정일인 행이 많다 (결산일 +120일 넘는 행 22%, +1년 넘는 행 6%. 예: 현대차 2015 → 2022-02). **최초 접수일**(`collectors.dividends.first_filed()`, `kind='사업보고서'`, `period`=결산 'YYYY.MM') 다음 날부터 쓴다. 값은 정정 후 값이라 정정이 배당 수치를 바꿨다면 아주 약한 미래참조가 남는다. 사업보고서(3월)는 배당결정 공시(보통 2월, `dart_disclosures`의 "현금ㆍ현물배당결정")보다 늦다 → 그 점에선 보수적. 같은 문제가 `dart_fin`에도 있으니 재무 전략도 `first_filed()`를 쓰면 된다.
   - `us_dividends`: 공시일이 없다. 배당은 배당락 전에 발표되므로 `ts`(배당락일)부터 쓰면 미래참조는 없지만 늦다 (실제 발표는 보통 1~4주 전).
@@ -95,6 +112,20 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
     대신 백테스트 엔진(`backtest/data.py` `load("kr_stock")`)이 `kr_dividend_schedule`의 배당락일에 배당소득세 15.4%(`config/settings.yaml` `kr_stock.dividend_tax_pct`)를 뗀 배당을 재투자해 **총수익**으로 계산한다.
     세율은 `dividend_tax` 인자(lab.yaml `dividend_tax`)로 바꾸고, `reinvest_dividends=False`면 예전처럼 가격 수익만 계산한다. report에 "KR 배당 재투자 반영" 여부가 찍힌다.
     `store.read("kr_adj_factor")`로 직접 수정주가를 만들면 여전히 배당이 빠진다.
+- **US 재무 (`edgar_facts`)**:
+  - 설정: SEC는 User-Agent에 연락처를 요구한다. 환경변수 또는 `.env`에 `SEC_USER_AGENT="이름 이메일"`을 사용자가 넣는다. 없으면 수집기는 건너뛰고 상태에 `skipped`를 남긴다. 코드·로그에는 이 값을 쓰지 않는다.
+  - 시점: `filed` 다음 거래일부터 알 수 있다. 같은 (`field`, `start`, `end`)에 공시가 여러 개면
+    - 최초 공시값(first): `filed`가 가장 이른 행. 정정 전 원래 숫자가 남아 있으므로 미래참조가 없다.
+    - 최신값(last as-of): asof 이전 `filed` 중 가장 늦은 행. 10-K/A·재작성 값은 그 `filed`부터 반영된다.
+    - 즉 정정(10-K/A, 10-Q/A)과 다음 해 비교 재무제표의 재작성 값을 지우지 않고 모두 남겨 두고, 엔진이 시점 규칙으로 고른다 (KR `dart_fin`은 최신 값만 남는 것과 다르다).
+  - 기간: 10-Q에는 3개월 값과 연초 누계(YTD)가 같이 있다 (`start`로 구분). 4분기 보고서는 없으므로 4분기 = 10-K 연간 − 3분기 누계. 회계연도가 달력과 다른 회사가 많다 (AAPL 9월 말).
+  - 태그: 같은 항목도 회사·연도마다 태그가 다르다 (매출: Revenues → RevenueFromContractWithCustomer…). 기간마다 `tag_rank`가 가장 작은 행을 쓴다. `net_income`의 1순위 `NetIncomeLoss`는 지배주주 귀속 순이익이다.
+  - 주식수: `shares_outstanding`의 1순위 `dei:EntityCommonStockSharesOutstanding`은 표지 기준일(공시 직전) 값, `us-gaap:CommonStockSharesOutstanding`은 기간 말 값이다. 클래스가 여러 개인 회사(GOOG/GOOGL, BRK)는 클래스별로 나뉘거나 합계만 있을 수 있다. GOOG·GOOGL처럼 같은 CIK면 같은 사실이 두 종목에 다 들어간다.
+  - 실제 JSON (2026-11-16 확인): fact 항목 = `start`(기간 항목만), `end`, `val`, `accn`, `fy`, `fp`, `form`, `filed`, `frame`(일부만). 정정 공시(10-K/A·10-Q/A)도 들어 있다 (AAPL 받는 항목 중 10-K/A 25행). 8-K 사실도 있다 (실적 발표 첨부 등).
+  - 시작 시점: 유니버스 515개사의 첫 10-K·10-Q XBRL 공시일은 2009-04-15가 가장 이르고, 2009년 239개사·2010년 140개사·2011년 34개사이며 나머지는 상장·분사 시점(중앙값 2010-07). 첫 공시의 비교 재무제표 덕분에 기간 끝은 그보다 앞선 값도 있다 (가장 이른 기간 끝 1989-12-31, 드묾).
+  - 적재 방식: **첫 백필은 일괄 파일, 갱신은 회사별 API.** 처음 받는 종목이 `edgar.bulk_min_new`(50) 이상이면 `companyfacts.zip`(전 기업, 매일 밤 재생성)을 데이터 루트 아래 임시 폴더에 받아 유니버스 회사 파일만 꺼내 같은 `parse_facts`로 적재하고 zip은 지운다. 이때 `edgar_companies.ts`는 zip 생성 시각(Last-Modified)이라, 그 뒤 공시는 일별 색인·30일 주기 규칙으로 회사별 API가 다시 받는다.
+  - 일괄 파일 크기 (2026-11-16 측정): zip 1.43GB(다운로드 약 4분), 20,588개사, 해제 시 19.5GB. 유니버스 515개사 파일은 해제 1.95GB, JSON 읽기 19초. 백필 때 데이터 루트 디스크에 약 1.5GB가 잠시 필요하다.
+  - 범위: 현재 구성종목만이라 **생존편향**이 있다. us-gaap만 받으므로 IFRS로 내는 외국 회사(20-F/40-F 중 IFRS)는 비어 있다 (ASML은 US GAAP라 있음). 8-K로만 나온 사실은 30일 주기 재수집 때 들어온다.
 - **legacy 재무제표 (US)**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다. 같은 기간 중복과 9개월 누적 행이 섞여 있다.
 - **legacy US 일봉**: 분할 반영 가격이고 상장폐지 종목이 없다 (생존편향).
 - **KR 분봉 유니버스**: 시총 상위 350개 + 실제 KOSPI200·KOSDAQ150 구성종목(2026-08 기준) 합집합, 420개.

@@ -9,6 +9,7 @@
     uv run python -m autotrader.data.cli collect us-sip      # Alpaca 1분봉 2016~ (키 필요)
     uv run python -m autotrader.data.cli collect news        # Alpaca 뉴스 2015~ (키 필요)
     uv run python -m autotrader.data.cli collect dividends   # 배당: DART 사업보고서(KR), Alpaca(US)
+    uv run python -m autotrader.data.cli collect edgar       # US 재무: SEC EDGAR companyfacts (SEC_USER_AGENT 필요)
     uv run python -m autotrader.data.cli collect binance --symbols BTCUSDT ETHUSDT
     uv run python -m autotrader.data.cli status
 
@@ -31,7 +32,7 @@ def main() -> None:
     c = sub.add_parser("collect")
     c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
                                       "us-minute", "us-sip", "news", "macro", "legacy", "kr-public",
-                                      "dividends"])
+                                      "dividends", "edgar"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
     h = sub.add_parser("health")
@@ -56,6 +57,7 @@ def main() -> None:
     from .collectors import (
         binance,
         dividends,
+        edgar,
         kr_public,
         kr_stock,
         legacy_db,
@@ -81,6 +83,8 @@ def main() -> None:
             kr_public.run(a.symbols)
         elif src == "dividends":
             dividends.run(a.symbols)
+        elif src == "edgar":
+            edgar.run(a.symbols)
         elif src.startswith("kr"):
             kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
         elif src == "news":

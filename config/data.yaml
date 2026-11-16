@@ -29,3 +29,12 @@ dividends:                     # `collect dividends` (collectors/dividends.py)
   kis_refresh_days: 7          # 상장 중인 종목은 이 주기로 다시 조회 (새 배당결정 반영)
   alpaca_start: "2016-01-01"   # Alpaca v1 배당락 이력 시작 (2015 이전은 비어 있음 확인)
   alpaca_ann_start: "2020-01-01"  # Alpaca v2 배당 발표(declaration_date) 이력 시작 (2019 이전은 비어 있음 확인)
+
+kr_public:                     # `collect kr-public` (collectors/kr_public.py)
+  dart_owner_max_calls: 8000   # 지배주주 순이익(dart_fin_owner, fnlttSinglAcntAll) 실행당 호출 상한. 연결 보고서 약 7.9만 건 백필 →
+                               # 하루 2회 실행이면 약 5일. DART 하루 한도(약 2만)를 dart_disclosures·dart_fin·dart_dividend와 공유
+
+edgar:                         # `collect edgar` (collectors/edgar.py). SEC_USER_AGENT(환경변수 또는 .env) 필요
+  refresh_days: 30             # 10-K·10-Q 색인에 안 잡혀도 이 주기로 companyfacts를 다시 받는다
+  max_companies_per_run: 600   # 실행당 companyfacts 상한 (유니버스 약 520개라 첫 실행에 전부)
+  bulk_min_new: 50             # 처음 받는 종목이 이만큼 이상이면 회사별 API 대신 일괄 파일 companyfacts.zip(약 1.4GB)으로 적재
