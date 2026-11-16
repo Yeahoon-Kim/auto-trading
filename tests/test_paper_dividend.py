@@ -92,3 +92,12 @@ def test_fractional_split_pays_cash_in_lieu():
     assert q0 % 2 == 1
     assert float(book.shares["A"]).is_integer() and book.shares["A"] == (q0 * 3) // 2
     assert book.equity == pytest.approx(1700)
+
+
+def test_adj_factor_wobble_is_not_a_split():
+    # 실데이터 012200·187660: kr_adj_factor가 분할 없이 날마다 ±1.3e-4 흔들림 → 수량을 건드리면 안 된다
+    fac = [1.0, 1.0, 1.000126, 0.999869, 1.000129, 1.0]
+    p = _panel([100 * x for x in fac], [100] * 6, factor=fac)
+    book, ev, q0 = _hold(p)
+    assert not _kinds(ev, "corporate_action", "dividend")
+    assert book.shares["A"] == q0
