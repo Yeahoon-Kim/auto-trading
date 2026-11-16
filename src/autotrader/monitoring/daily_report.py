@@ -34,6 +34,8 @@ SYSTEM = """너는 헤지펀드 운영팀(ops-reporter)이다. 아래 '사실 �
 - 숫자는 표에서 그대로 옮긴다. 표에 없는 숫자를 만들지 않는다. 추정하면 "추정"이라고 쓴다.
 - 백필완료가 "-"인 데이터셋은 파생 표·신선도 점검 비대상이므로 백필 문제로 보지 않는다.
 - 문제는 숨기지 않고 맨 위에 쓴다. 문제가 없으면 "문제 없음"이라고 쓴다.
+- '문제'는 표의 "미해결"만이다. "복구됨"과 수집 로그의 과거 ERROR는 이미 해결됐으므로 문제로 세지 않는다
+  (필요하면 데이터 상태에 "복구됨 N건"으로만 쓴다). 미해결이 0건이고 신선도 점검도 0건이면 "문제 없음"이다.
 - 리서치 진행 상태의 판정 대기(validator 의견서 없음 / 사용자 판정 대기)는 '다음 할 일'에 lab id와 함께 쓴다.
 - 형식(순서 고정): 문제 → 데이터 상태 → 전략·판단 기록(리서치 진행 포함) → 다음 할 일. 전체 10줄 안팎(최대 12줄), 한 줄에 한 사실, 한국어.
 - 주문·설정 변경을 권하지 않는다. 매수·매도 의견을 내지 않는다."""
@@ -68,12 +70,36 @@ def _health() -> list[str]:
         return [f"[error] health: 점검 실패 {type(e).__name__}: {e}"[:200]]
 
 
-def _collect_log(day: str) -> dict:
+def _error_state() -> dict:
+    """수집 상태DB의 오류 행을 미해결/복구됨으로 나눈다 (분류 기준은 health.split_errors)."""
+    from . import health
+    try:
+        o, r = health.split_errors(health._state(), pd.Timestamp.now(tz="UTC"))
+    except Exception as e:  # noqa: BLE001
+        return {"open": [], "recovered": [], "failed": f"{type(e).__name__}: {e}"[:200]}
+
+    def rows(df: pd.DataFrame) -> list[tuple[str, str, str]]:
+        return [(d, s, _mask(str(m or ""))[:100]) for d, s, m in zip(df["dataset"], df["symbol"], df["error"])]
+    return {"open": rows(o), "recovered": rows(r), "failed": None}
+
+
+# 로그 오류 줄 "kr_1m 017670 실패: ..." 에서 (데이터셋, 종목)을 뽑아 상태DB와 맞춰 본다
+_LOG_KEY = re.compile(r"^(\S+) (\S+) 실패")
+
+
+def split_log_error(msg: str, open_keys: set[tuple[str, str]]) -> bool:
+    """로그 ERROR 한 줄이 지금도 미해결인 (데이터셋, 종목)의 것이면 True. 못 알아보면 False(과거 발생으로 센다)."""
+    m = _LOG_KEY.match(msg)
+    return bool(m) and (m[1], m[2]) in open_keys
+
+
+def _collect_log(day: str, open_keys: set[tuple[str, str]] | None = None) -> dict:
     path = LOG_DIR / f"collect_{day}.log"
     if not path.exists():
-        return {"exists": False, "errors": 0, "where": []}
+        return {"exists": False, "errors": 0, "open": 0, "where": []}
     where: Counter = Counter()
     first: dict[str, str] = {}
+    n_open = 0
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         parts = line.split(" | ", 2)
         if len(parts) < 3 or parts[1].strip() != "ERROR":
@@ -81,7 +107,8 @@ def _collect_log(day: str) -> dict:
         loc, _, msg = parts[2].partition(" - ")
         where[loc] += 1
         first.setdefault(loc, _mask(msg)[:100])
-    return {"exists": True, "errors": sum(where.values()),
+        n_open += split_log_error(msg, open_keys or set())
+    return {"exists": True, "errors": sum(where.values()), "open": n_open,
             "where": [(loc, n, first[loc]) for loc, n in where.most_common(3)]}
 
 
@@ -201,7 +228,10 @@ def _backlog(section: str = "후보") -> int | None:
 def collect(day: str | None = None) -> dict:
     day = day or _today()
     sizes = _sizes()
-    return {"day": day, "status": _collect_status(), "health": _health(), "log": _collect_log(day),
+    errors = _error_state()
+    open_keys = {(d, s) for d, s, _ in errors["open"]}
+    return {"day": day, "status": _collect_status(), "health": _health(), "errors": errors,
+            "log": _collect_log(day, open_keys),
             "llm": _llm_calls(day), "scan": _scan(day), "decisions": _decisions(),
             "sizes": sizes, "growth": _size_growth(day, sizes), "labs": _labs(), "backlog": _backlog()}
 
@@ -218,8 +248,10 @@ def _pct(x: float | None) -> str:
 
 def table(f: dict) -> str:
     from . import health
+    errs = f.get("errors") or {"open": [], "recovered": [], "failed": None}
+    open_by = Counter(d for d, _, _ in errs["open"])
     L = [f"# 운영 사실 표 {f['day']} (KST)", "", "## 수집 상태 (store.summary)",
-         "dataset | 종목 | 마지막 봉(UTC) | 백필완료 | 오류"]
+         "dataset | 종목 | 마지막 봉(UTC) | 백필완료 | 미해결 오류"]
     for r in f["status"]:
         if "error" in r and "symbols" not in r:
             L.append(f"{r['dataset']} | 읽기 실패: {r['error']}")
@@ -227,14 +259,22 @@ def table(f: dict) -> str:
         last = str(r.get("last_ts") or "-")[:16]
         # 신선도 점검 대상이 아닌 데이터셋(파생 표 등)은 백필 개념이 없다 → "-"
         bf = int(r["backfilled"] or 0) if r["dataset"] in health.RULES else "-"
-        L.append(f"{r['dataset']} | {r['symbols']} | {last} | {bf} | {int(r['errors'] or 0)}")
+        L.append(f"{r['dataset']} | {r['symbols']} | {last} | {bf} | {open_by.get(r['dataset'], 0) if 'errors' in f else int(r['errors'] or 0)}")
     L += ["", f"## 신선도 점검 (health.check): {len(f['health'])}건"] + [f"- {h}" for h in f["health"]]
+    L += ["", "## 수집 오류 (상태DB)"]
+    if errs.get("failed"):
+        L.append(f"- 상태DB 읽기 실패: {errs['failed']}")
+    L.append(f"- 미해결 {len(errs['open'])}건")
+    L += [f"  - {d} {s}: {m}" for d, s, m in errs["open"][:5]]
+    L.append(f"- 복구됨 {len(errs['recovered'])}건 (오류가 났지만 지금은 데이터가 최신 — 문제 아님)")
+    L += [f"  - {d} {s}" for d, s, _ in errs["recovered"][:5]]
     lg = f["log"]
     L += ["", "## 수집 로그"]
     if not lg["exists"]:
         L.append(f"- logs/collect_{f['day']}.log 없음 (오늘 수집 미실행 의심)")
     else:
-        L.append(f"- ERROR {lg['errors']}건")
+        L.append(f"- ERROR {lg['errors']}건 중 미해결 종목 {lg.get('open', 0)}건, "
+                 f"나머지 {lg['errors'] - lg.get('open', 0)}건은 발생 후 복구됨·종목 불명 (아래 예시는 과거 기록, 문제 아님)")
         L += [f"  - {loc} ×{n}: {msg}" for loc, n, msg in lg["where"]]
     m = f["llm"]
     L += ["", "## LLM 호출 (logs/llm_calls.jsonl, 오늘)",

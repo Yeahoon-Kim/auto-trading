@@ -35,6 +35,7 @@ def _lab(labs, name, status, retirement=""):
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "DATA_DIR", tmp_path / "processed")
+    monkeypatch.setattr(store, "STATE_DB", tmp_path / "state.sqlite")
     for name in ("LOG_DIR", "REPORT_DIR"):
         monkeypatch.setattr(dr, name, tmp_path / name.lower())
     monkeypatch.setattr(dr, "LABS_DIR", tmp_path / "labs")
