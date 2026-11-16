@@ -73,6 +73,7 @@ class Bar:
     adj_close: pd.Series
     tradable: pd.Series
     present: pd.Series
+    factor: pd.Series | None = None   # kr_adj_factor (panel["_f"], 분할·병합만). 없으면 비율 범위로 나눈다
 
 
 def bars(panel) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -92,7 +93,8 @@ def bars(panel) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
 
 def bar_at(panel, raw: tuple, i: int) -> Bar:
     ro, rc, tr, pr = raw
-    return Bar(panel.index[i], ro.iloc[i], rc.iloc[i], panel.close.iloc[i], tr.iloc[i], pr.iloc[i])
+    return Bar(panel.index[i], ro.iloc[i], rc.iloc[i], panel.close.iloc[i], tr.iloc[i], pr.iloc[i],
+               panel["_f"].iloc[i] if "_f" in panel else None)
 
 
 def _floor(q: float, lot: float) -> float:
@@ -174,21 +176,67 @@ def _fill(book, ev, o, q, px, fee, tax, lab, date) -> None:
 
 # --- 2. 평가 -------------------------------------------------------------------------
 
+NOISE = 1e-4            # 원본가·수정주가 수익 차이가 이 안이면 무시 (수정주가 부동소수 오차 ±4e-6, 가장 작은 실제 배당 0.1% 안팎)
+MIN_SPLIT_FACTOR = 0.7   # 수정계수 정보가 없을 때: 비율이 0.7~1이면 배당락, 그 밖은 분할·병합으로 본다
+
+
+def split_dividend(f: float, split: float | None) -> tuple[float, float]:
+    """원본가·수정주가 수익 비율 f = (원본 종가 수익) / (수정 종가 수익)을 (주식 수 배율, 배당 비율)로 나눈다.
+    수정주가 = 원본가 × kr_adj_factor × (세후 배당 재투자) × (주식수 기반 병합 보정)이라
+    f = 분할 부분 × 배당 부분 × 그 밖 보정. split = 직전 kr_adj_factor / 오늘 kr_adj_factor (없으면 None).
+    반환: shares_div — 보유 수량을 이 값으로 나눈다 (2:1 분할 0.5 → 수량 2배). 1이면 수량 그대로.
+          div — 배당 부분 r (0.7~1). 세후 주당 배당 = 원본 종가 × (1/r - 1). 1이면 배당 없음."""
+    if abs(f - 1) <= NOISE:
+        return 1.0, 1.0
+    s = split if split is not None and abs(split - 1) > NOISE else 1.0
+    if split is None and not (MIN_SPLIT_FACTOR < f < 1):
+        s = f                                   # 수정계수 정보 없음 → 범위 밖이면 분할·병합
+    r = f / s
+    if abs(r - 1) <= NOISE:
+        return s, 1.0
+    if MIN_SPLIT_FACTOR < r < 1:
+        return s, r                             # 원본가가 수정주가보다 덜 오름 → 배당락 (현금)
+    return s * r, 1.0                           # 수정계수 밖의 주식 수 변화 (주식수 기반 병합·감자 보정 등)
+
+
 def mark(book: Book, bar: Bar, prev_adj: pd.Series | None, costs: Costs, tax: float,
-         risk: dict, lab: str) -> list[dict]:
-    """기업행위 반영, 측정 불가 정리, 종가 평가. prev_adj = 현재 panel의 '직전 처리 봉' 수정 종가."""
+         risk: dict, lab: str, prev_factor: pd.Series | None = None, lot: float = 1.0) -> list[dict]:
+    """기업행위 반영, 측정 불가 정리, 종가 평가. prev_adj = 현재 panel의 '직전 처리 봉' 수정 종가,
+    prev_factor = 그 봉의 kr_adj_factor (panel["_f"]가 있을 때).
+    기업행위: 배당락은 세후 현금 배당을 장부에 넣고(수량 그대로), 분할·병합은 수량을 고친다.
+    정수 주식으로 내림하고 남는 단주는 그날 원본 종가로 현금 정산한다 (실제 단주 대금처럼).
+    배당 현금은 배당락일에 넣는다 (실제 입금은 한두 달 뒤 — 엔진의 배당 재투자 가정과 맞추려는 것)."""
     ev: list[dict] = []
     for s in list(book.shares):
         raw, adj = bar.close.get(s, np.nan), bar.adj_close.get(s, np.nan)
         old = book.last_px.get(s)
         pa = prev_adj.get(s, np.nan) if prev_adj is not None else np.nan
-        if np.isfinite(raw) and np.isfinite(adj) and old and np.isfinite(pa) and pa > 0 and adj > 0:
+        if np.isfinite(raw) and np.isfinite(adj) and old and np.isfinite(pa) and pa > 0 and adj > 0 and raw > 0:
             f = (raw / old) / (adj / pa)
-            if abs(f - 1) > 0.01:      # 원본가와 수정주가 수익이 1% 넘게 다르면 분할·병합 등
-                q0 = book.shares[s]
-                book.shares[s] = q0 / f
-                ev.append({"kind": "corporate_action", "symbol": s, "factor": f, "from": q0, "to": q0 / f,
-                           "reason": "원본가·수정주가 수익 차이 → 보유 수량 조정 (실제 계좌 내역과 대조 필요)"})
+            split = None
+            if bar.factor is not None and prev_factor is not None:
+                fn, fp = bar.factor.get(s, np.nan), prev_factor.get(s, np.nan)
+                if np.isfinite(fn) and np.isfinite(fp) and fn > 0 and fp > 0:
+                    split = fp / fn
+            k, r = split_dividend(f, split)
+            q0 = book.shares[s]
+            if k != 1.0:
+                q = q0 / k
+                qi = round(q) if abs(q - round(q)) < 1e-6 else _floor(q, lot)
+                frac = (q - qi) * raw
+                book.shares[s] = qi
+                book.cash += frac
+                ev.append({"kind": "corporate_action", "symbol": s, "factor": k, "from": q0, "to": qi,
+                           "cash_in_lieu": frac,
+                           "reason": ("kr_adj_factor 분할·병합" if split is not None and abs(split - 1) > NOISE
+                                      else "원본가·수정주가 수익 차이 (수정계수 밖 병합·감자 보정 등)")
+                                     + " → 보유 수량 조정 (실제 계좌 내역과 대조 필요)"})
+            if r != 1.0:
+                per_share = raw * (1 / r - 1)
+                cash = book.shares[s] * per_share
+                book.cash += cash
+                ev.append({"kind": "dividend", "symbol": s, "per_share_net": per_share, "qty": book.shares[s],
+                           "cash": cash, "reason": "배당락: 세후 배당을 현금으로 (실제 입금은 지급일, 계좌 내역과 대조)"})
         if bool(bar.present.get(s, False)):
             book.missed.pop(s, None)
             if np.isfinite(raw) and raw > 0:
@@ -349,11 +397,13 @@ def step(book: Book, panel, raw: tuple, W: pd.DataFrame, i: int, costs: Costs, r
     bar = bar_at(panel, raw, i)
     tax = float(costs.tax_rates(pd.DatetimeIndex([date]))[0])
     first = book.last_bar is None
-    prev_adj = None
+    prev_adj = prev_factor = None
     if not first and pd.Timestamp(book.last_bar) in panel.index:
         prev_adj = panel.close.loc[pd.Timestamp(book.last_bar)]
+        if "_f" in panel:
+            prev_factor = panel["_f"].loc[pd.Timestamp(book.last_bar)]
     ev = settle(book, bar, costs, tax, lab, lot)
-    ev += mark(book, bar, prev_adj, costs, tax, risk, lab)
+    ev += mark(book, bar, prev_adj, costs, tax, risk, lab, prev_factor=prev_factor, lot=lot)
     if first:
         book.peak = max(book.peak, book.equity)
         book.prev_equity = book.equity
