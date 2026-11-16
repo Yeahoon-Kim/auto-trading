@@ -6,6 +6,8 @@
 
 | 날짜 | 병합 커밋 | 변경 | 기존 결과 영향 | 다시 돌릴 lab |
 |---|---|---|---|---|
+| 2026-11-17 | `6796d99` | KR 지배주주 순이익 TTM(`net_income_controlling_ttm`), `eps_ttm`(지배주주 순이익 TTM ÷ 보통+우선 상장주식수, 자사주 미차감, 우선주 코드는 NaN, PER = `raw_close` / `eps_ttm`), US EDGAR 재무 필드(`equity`, `shares_outstanding`, `revenue_ttm`, `operating_income_ttm`, `net_income_ttm` 등, 공시 다음 거래일, `fin_timing` first/last). US EPS·시가총액은 분할 이력이 없어 미제공 | 영향 없음 (새 필드, 기존 KR 재무 필드 값 그대로). 지배주주 순이익·edgar_facts 백필 전에는 값이 비어 있음 | — |
+| 2026-11-17 | `a8387ef` | paper 데스크(비중형·신호형): 배당락은 세후 현금, 분할·병합은 `kr_adj_factor` 기준 수량 조정·단주 현금 정산 | 백테스트 결과 영향 없음 (paper만). L001 250봉 paper−엔진 차이 +1.08% → +0.81% | — |
 | 2026-11-16 | `b4b2a77` | **코인 선물 펀딩비 반영** (`binance_um_funding`, 정산 시각이 든 봉의 포지션에 비중 × 비율, 롱은 양수에 냄·숏은 받음). `load(funding=False)`·lab.yaml `funding: false`로 끌 수 있음. 신호형 paper 데스크에는 아직 미반영 | 선물 롱 결과가 낮아짐. 예: BTC·ETH 50:50 롱(2021~) 펀딩 연 −11.5%, 누적 223.5% → 74.5% | crypto_futures lab 전부 (지금 없음) |
 | 2026-11-16 | `54d2be1` | `AUTOTRADER_DATA_DIR`로 데이터 위치 지정 | 영향 없음 | — |
 | 2026-11-16 | `bd416f2` | KR 재무(`dart_fin`) 필드, 공시 다음 거래일부터 보임 | 영향 없음 (새 필드) | — |
