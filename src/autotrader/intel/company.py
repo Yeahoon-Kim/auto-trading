@@ -23,7 +23,12 @@ import pandas as pd
 
 from ..data import store
 
-LEG = "data/processed/legacy"
+
+def _d() -> str:
+    """데이터 폴더(store.DATA_DIR, AUTOTRADER_DATA_DIR 반영). 실행 위치(cwd)와 무관하게."""
+    return store.DATA_DIR.as_posix()
+
+
 LAG = {"quarterly": 45, "annual": 90}
 
 
@@ -36,7 +41,7 @@ def _market(symbol: str) -> str:
 
 
 def _info(sym: str, mkt: str) -> dict:
-    df = _q(f"SELECT name, name_ko, exchange, shares_outstanding FROM '{LEG}/instruments.parquet' "
+    df = _q(f"SELECT name, name_ko, exchange, shares_outstanding FROM '{_d()}/legacy/instruments.parquet' "
             f"WHERE symbol='{sym}' AND market='{mkt}'")
     return df.iloc[0].to_dict() if len(df) else {}
 
@@ -44,12 +49,12 @@ def _info(sym: str, mkt: str) -> dict:
 def _prices(sym: str, mkt: str, asof: pd.Timestamp) -> pd.DataFrame:
     """일봉 (ts, close, market_cap). KR은 krx_1d(시가총액 포함), US는 us_1d → 없으면 legacy."""
     if mkt == "KR":
-        df = _q(f"SELECT ts, close, market_cap, name FROM 'data/processed/krx_1d/ALL/*.parquet' "
+        df = _q(f"SELECT ts, close, market_cap, name FROM '{_d()}/krx_1d/ALL/*.parquet' "
                 f"WHERE symbol='{sym}' ORDER BY ts")
     else:
         df = store.read("us_1d", sym)
         if df.empty:
-            df = _q(f"SELECT trade_date AS ts, close FROM '{LEG}/daily_prices_us.parquet' "
+            df = _q(f"SELECT trade_date AS ts, close FROM '{_d()}/legacy/daily_prices_us.parquet' "
                     f"WHERE symbol='{sym}' ORDER BY trade_date")
         df = df[["ts", "close"]].copy()
         shares = _info(sym, mkt).get("shares_outstanding")
@@ -78,7 +83,7 @@ BS = ("total_assets", "total_liabilities", "total_equity")
 def _fund_dart(sym: str, asof: pd.Timestamp) -> pd.DataFrame:
     if not any((store.DATA_DIR / "dart_fin" / "ALL").glob("*.parquet")):  # 아직 수집 전
         return pd.DataFrame()
-    d = _q(f"SELECT * FROM 'data/processed/dart_fin/ALL/*.parquet' WHERE symbol='{sym}'")
+    d = _q(f"SELECT * FROM '{_d()}/dart_fin/ALL/*.parquet' WHERE symbol='{sym}'")
     if d.empty:
         return d
     local = lambda s: pd.to_datetime(s, utc=True).dt.tz_convert("Asia/Seoul").dt.tz_localize(None)  # noqa: E731
@@ -109,7 +114,7 @@ def _fund_dart(sym: str, asof: pd.Timestamp) -> pd.DataFrame:
 
 def _fund_legacy(sym: str, mkt: str, asof: pd.Timestamp) -> pd.DataFrame:
     df = _q(f"SELECT period_label, period_type, effective_date, revenue, operating_income, net_income, eps "
-            f"FROM '{LEG}/fundamentals.parquet' WHERE symbol='{sym}' AND market='{mkt}'")
+            f"FROM '{_d()}/legacy/fundamentals.parquet' WHERE symbol='{sym}' AND market='{mkt}'")
     if df.empty:
         return df
     df["effective_date"] = pd.to_datetime(df["effective_date"])
@@ -163,12 +168,12 @@ def _ret(p: pd.DataFrame, days: int) -> float:
 def _disclosures(sym: str, mkt: str, asof: pd.Timestamp, days: int) -> pd.DataFrame:
     start = (asof - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
     end = (asof - pd.Timedelta(days=1)).strftime("%Y-%m-%d")  # 접수일 다음 날부터 알 수 있음
-    leg = _q(f"SELECT CAST(filed_at AS DATE) AS date, category, title FROM '{LEG}/disclosures.parquet' "
+    leg = _q(f"SELECT CAST(filed_at AS DATE) AS date, category, title FROM '{_d()}/legacy/disclosures.parquet' "
              f"WHERE symbol='{sym}' AND market='{mkt}' AND category <> 'insider' "
              f"AND filed_at BETWEEN '{start}' AND '{end}'")
     if mkt == "KR":
         new = _q(f"SELECT ts, '' AS category, report_nm AS title "
-                 f"FROM 'data/processed/dart_disclosures/ALL/*.parquet' WHERE symbol='{sym}'")
+                 f"FROM '{_d()}/dart_disclosures/ALL/*.parquet' WHERE symbol='{sym}'")
         # ts = KST 접수일 자정의 UTC → KST 날짜로
         new["date"] = pd.to_datetime(new["ts"], utc=True).dt.tz_convert("Asia/Seoul").dt.date
         new = new[(new["date"] >= pd.Timestamp(start).date()) & (new["date"] <= pd.Timestamp(end).date())]
@@ -181,7 +186,7 @@ def _disclosures(sym: str, mkt: str, asof: pd.Timestamp, days: int) -> pd.DataFr
 
 def _insiders(sym: str, mkt: str, asof: pd.Timestamp, days: int) -> pd.DataFrame:
     start = (asof - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-    return _q(f"SELECT transaction, count(*) AS n, sum(shares) AS shares FROM '{LEG}/insider_events.parquet' "
+    return _q(f"SELECT transaction, count(*) AS n, sum(shares) AS shares FROM '{_d()}/legacy/insider_events.parquet' "
               f"WHERE symbol='{sym}' AND market='{mkt}' AND event_date BETWEEN '{start}' AND '{asof:%Y-%m-%d}' "
               f"GROUP BY 1 ORDER BY n DESC")
 

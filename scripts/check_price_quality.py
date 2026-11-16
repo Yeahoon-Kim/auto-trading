@@ -15,8 +15,10 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from autotrader.data import store
+
 ROOT = Path(__file__).resolve().parents[1]
-D = (ROOT / "data" / "processed").as_posix()
+D = store.DATA_DIR.as_posix()  # AUTOTRADER_DATA_DIR 반영
 KST = "Asia/Seoul"
 LIMIT_CHANGE = pd.Timestamp("2015-06-15")   # 가격제한폭 ±15% → ±30%
 DELIST_TAIL = 15                            # 상장폐지 직전 정리매매로 보는 거래일 수
