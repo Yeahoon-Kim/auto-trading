@@ -11,6 +11,8 @@
       회사당 연 1회 호출이라 하루 호출 한도(약 2만, dart_disclosures·dart_fin과 공유) 때문에
       실행마다 최대 dart_max_calls 만큼 진행하고 다음 실행에 이어받는다.
       배당 기록이 없는 회사·연도도 has_data=False 행으로 남겨 다시 묻지 않는다(사업보고서 마감 전이면 다시 확인).
+- kr_dividend_schedule (symbol=ALL): KIS 예탁원 배당 일정, 기준일 2010~, 종목별(상장폐지 포함).
+      ts = 기준일, ex_date = 배당락일(거래일로 계산), dps = 주당 현금배당금. 공시일이 없어 배당락 가격 보정용.
 - us_dividends (symbol=ALL): Alpaca corporate actions v1, 현금·주식배당, 배당락일 2016~.
       날짜 창으로 시장 전체를 받으므로 상장폐지 종목도 들어 있다(생존편향 없음). rate는 원본(분할 미반영) 주당 금액.
       공시일이 없다 → ts = 배당락일(ex_date). 배당은 배당락 전에 발표되므로 "ex_date에 알 수 있음"은 보수적이다.
@@ -255,6 +257,103 @@ def collect_dart_filings(budget: list[int]) -> None:
         logger.error(f"{ds} 실패: {e}")
 
 
+# ── KR: KIS 예탁원 배당 일정 (기준일·배당락일) ──
+# 종목별로 조회하면 2010~ 전체가 나온다 (시장 전체를 날짜로 조회하면 100건에서 잘린다).
+# 공시일은 없다 → 신호가 아니라 배당락일 가격 보정(총수익)용. 신호 시점은 dart_dividend + first_filed().
+SCHED_DS = "kr_dividend_schedule"
+
+
+def ex_dates(record: pd.Series, trading_days: pd.DatetimeIndex) -> pd.Series:
+    """기준일 → 배당락일. 결제가 T+2라 '기준일 이하 마지막 거래일'의 바로 전 거래일이 배당락일이다.
+    예: 2024-12-31(휴장) 기준일 → 마지막 거래일 12-30 → 배당락 12-27. 거래일 범위 밖이면 NaT."""
+    out = pd.Series(pd.NaT, index=record.index, dtype="datetime64[ns]")
+    td = trading_days.sort_values()
+    if not len(td):
+        return out
+    r = record.to_numpy(dtype="datetime64[ns]")
+    pos = td.searchsorted(r, side="right") - 2  # 기준일 이하 마지막 거래일의 위치 − 1
+    ok = (pos >= 0) & ~pd.isna(r) & (r <= td[-1].to_datetime64())  # 마지막 거래일 뒤 기준일은 아직 모름
+    out.iloc[ok] = td[pos[ok]]
+    return out
+
+
+def parse_schedule(rows: list[dict], code: str, trading_days: pd.DatetimeIndex) -> pd.DataFrame:
+    """KIS HHKDB669102C0 output1 → 행. dps = 주당 현금배당금(원), divi_rate = 액면 대비 배당률(%)."""
+    if not rows:
+        return pd.DataFrame()
+    d = pd.DataFrame(rows)
+    d = d[d["sht_cd"].str.strip() == code]  # 조회 종목만
+    if d.empty:
+        return pd.DataFrame()
+    rec = pd.to_datetime(d["record_date"], format="%Y%m%d", errors="coerce")
+    date = lambda c: pd.to_datetime(d[c].str.replace("/", ""), format="%Y%m%d", errors="coerce")
+    out = pd.DataFrame({
+        "ts": rec.dt.tz_localize(KST).dt.tz_convert("UTC"), "symbol": code, "name": d["isin_name"].str.strip(),
+        "kind": d["divi_kind"].str.strip(), "stock_kind": d["stk_kind"].str.strip(),
+        "dps": _num(d["per_sto_divi_amt"]), "divi_rate": _num(d["divi_rate"]),
+        "stock_divi_rate": _num(d["stk_divi_rate"]), "face_value": _num(d["face_val"]),
+        "pay_date": date("divi_pay_dt"), "stock_pay_date": date("stk_div_pay_dt"),
+        "high_dividend": d["high_divi_gb"].str.strip(),
+        "ex_date": ex_dates(rec, trading_days).to_numpy(),
+    })
+    return out.dropna(subset=["ts"]).drop_duplicates(["ts", "symbol", "kind", "stock_kind"], keep="last")
+
+
+def _updated_at(ds: str) -> dict[str, pd.Timestamp]:
+    with store._db() as con:
+        rows = con.execute("SELECT symbol, updated_at FROM state WHERE dataset=? AND backfill_done=1", (ds,)).fetchall()
+    return {s: pd.Timestamp(t) for s, t in rows}
+
+
+def collect_kr_schedule() -> None:
+    """종목별 1회 조회(2010~). 상장 중인 종목은 refresh_days마다 다시 묻고(새 배당 반영), 상장폐지 종목은 한 번이면 끝."""
+    from .kr_stock import _get  # KIS 클라이언트는 쓸 때만 만든다
+
+    ds = SCHED_DS
+    cfg = config().get("dividends", {})
+    start = cfg.get("kis_start", "2010-01-01").replace("-", "")
+    refresh = pd.Timedelta(days=int(cfg.get("kis_refresh_days", 7)))
+    now = pd.Timestamp.now(tz="UTC")
+    try:
+        src = f"'{store.DATA_DIR.as_posix()}/krx_1d/ALL/*.parquet'"
+        kday = lambda s: pd.to_datetime(s, utc=True).dt.tz_convert(KST).dt.tz_localize(None).dt.normalize()
+        days = pd.DatetimeIndex(sorted(kday(store.query(f"SELECT DISTINCT ts FROM {src}")["ts"])))
+        syms = store.query(f"SELECT symbol, max(ts) last FROM {src} WHERE ts >= '{cfg.get('kis_start', '2010-01-01')}' "
+                           "GROUP BY symbol")
+        listed = set(syms.loc[kday(syms["last"]) == days[-1], "symbol"])
+        seen = _updated_at(ds)
+        todo = [s for s in sorted(syms["symbol"])
+                if s not in seen or (s in listed and seen[s] < now - refresh)]
+        end = (pd.Timestamp.now(tz=KST) + pd.Timedelta(days=365)).strftime("%Y%m%d")  # 발표된 미래 기준일도
+        buf, got = [], []
+
+        def flush() -> None:
+            store.write(ds, "ALL", pd.concat(buf, ignore_index=True) if buf else pd.DataFrame(),
+                        key=["ts", "symbol", "kind", "stock_kind"])
+            for s in got:
+                store.set_state(ds, s, backfill_done=True)
+            buf.clear()
+            got.clear()
+
+        for i, code in enumerate(todo, 1):
+            j = _get("/uapi/domestic-stock/v1/ksdinfo/dividend", "HHKDB669102C0",
+                     {"CTS": "", "GB1": "0", "F_DT": start, "T_DT": end, "SHT_CD": code, "HIGH_GB": ""})
+            rows = j.get("output1") or []
+            if len(rows) >= 100:
+                logger.warning(f"{ds} {code}: 100건 — 잘렸을 수 있음")
+            buf.append(parse_schedule(rows, code, days))
+            got.append(code)
+            if len(got) >= 300:
+                flush()
+                logger.info(f"{ds} {i:,}/{len(todo):,}")
+        flush()
+        store.set_state(ds, "ALL", backfill_done=True)
+        logger.info(f"{ds} {len(todo):,}종목 조회")
+    except Exception as e:
+        store.set_state(ds, "ALL", status="error", error=str(e)[:500])
+        logger.error(f"{ds} 실패: {e}")
+
+
 # ── US: Alpaca ──
 def _ny_ts(s: pd.Series) -> pd.Series:
     return pd.to_datetime(s, errors="coerce").dt.tz_localize(NY).dt.tz_convert("UTC")
@@ -384,6 +483,10 @@ def run(symbols: list[str] | None = None) -> None:
     else:
         collect_us_dividends(headers)
         collect_us_announcements(headers)
+    if os.environ.get("KIS_LIVE_APP_KEY"):
+        collect_kr_schedule()
+    else:
+        logger.info(f"{SCHED_DS}: KIS 키 없음 → 건너뜀")
     if not os.environ.get("DART_API_KEY"):
         logger.info("dart_dividend: DART_API_KEY 없음 → 건너뜀")
         return

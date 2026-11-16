@@ -127,3 +127,29 @@ def test_parse_filings_first_filed(monkeypatch):
     ff = dv.first_filed().set_index(["kind", "period"])
     row = ff.loc[("사업보고서", "2015.12")]
     assert row["first_filed"] == pd.Timestamp("2016-03-30", tz="Asia/Seoul") and row["n_filings"] == 2
+
+
+def test_ex_dates():
+    td = pd.DatetimeIndex(["2024-12-26", "2024-12-27", "2024-12-30", "2025-01-02", "2025-03-28", "2025-03-31"])
+    rec = pd.Series(pd.to_datetime(["2024-12-31", "2025-03-31", "2024-12-26", "2025-06-30", None]))
+    ex = dv.ex_dates(rec, td)
+    assert ex[0] == pd.Timestamp("2024-12-27")   # 휴장일 기준일 → 마지막 거래일(12-30)의 전 거래일
+    assert ex[1] == pd.Timestamp("2025-03-28")   # 거래일 기준일 → 전 거래일
+    assert pd.isna(ex[2])                        # 거래일 범위 앞
+    assert pd.isna(ex[3]) and pd.isna(ex[4])     # 아직 모르는 미래 거래일, 빈 값
+
+
+def test_parse_schedule():
+    td = pd.DatetimeIndex(["2025-03-27", "2025-03-28", "2025-03-31"])
+    rows = [{"record_date": "20250331", "sht_cd": "005930", "isin_name": "삼성전자", "divi_kind": "분기",
+             "face_val": "100", "per_sto_divi_amt": "365", "divi_rate": "365.00", "stk_divi_rate": "0.00",
+             "divi_pay_dt": "2025/05/20", "stk_div_pay_dt": "", "odd_pay_dt": "", "stk_kind": "보통",
+             "high_divi_gb": ""},
+            {"record_date": "20250331", "sht_cd": "000000", "isin_name": "다른종목", "divi_kind": "결산",
+             "face_val": "500", "per_sto_divi_amt": "0", "divi_rate": "0", "stk_divi_rate": "0",
+             "divi_pay_dt": "", "stk_div_pay_dt": "", "odd_pay_dt": "", "stk_kind": "", "high_divi_gb": ""}]
+    d = dv.parse_schedule(rows, "005930", td)
+    assert len(d) == 1 and d["dps"].iloc[0] == 365 and d["kind"].iloc[0] == "분기"
+    assert d["ts"].iloc[0] == pd.Timestamp("2025-03-31", tz="Asia/Seoul")
+    assert d["ex_date"].iloc[0] == pd.Timestamp("2025-03-28") and d["pay_date"].iloc[0] == pd.Timestamp("2025-05-20")
+    assert dv.parse_schedule([], "005930", td).empty
