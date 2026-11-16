@@ -12,6 +12,9 @@
 - us_stock  : us_1d (현재 수집 종목 = 지금 살아 있는 종목 → 생존편향 있음). adj_close/close 비율로 OHLC 수정.
 - 배당 신호 필드 (kr_stock·us_stock, fields에 적으면): dps(그날 알 수 있는 주당배당금), div_yield(dps / raw_close).
               시점 규칙은 dividends() 참고. check_dividend_causality()가 데이터를 잘라 다시 만든 값과 비교한다.
+- 재무 필드 (kr_stock, fields에 적으면): dart_fin 분기 재무. 재무상태 FIN_BS(equity, total_liabilities …)는 최근 분기말 값,
+              손익 FIN_TTM(net_income_ttm …)은 최근 4개 분기 3개월 값 합. 공개일 다음 거래일부터 보인다 (fin_reports()).
+              check_fin_causality()가 cut 전에 공개된 보고서만으로 다시 만든 값과 비교한다.
 - crypto_spot / crypto_futures : binance_spot_1m / binance_um_1m을 timeframe(1d, 1h …)으로 묶음. UTC 기준.
               선물 펀딩비는 엔진에 반영하지 않는다 (필요하면 binance_um_funding을 lab에서 직접 읽어 신호·비용에 넣는다).
 
@@ -46,6 +49,8 @@ class Panel(dict):
         self.market, self.timeframe = market, timeframe
         self.meta = meta or {}
         self.div_basis: pd.DataFrame | None = None   # 배당 필드를 다시 만드는 재료 (check_dividend_causality용)
+        self.fin_reports: pd.DataFrame | None = None  # 재무 필드 원천 보고서 표 (check_fin_causality용)
+        self.fin_basis: pd.DataFrame | None = None    # 재무 필드를 붙인 (date, symbol) 행
 
     def __getattr__(self, name):
         try:
@@ -91,7 +96,7 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
          timeframe: str = "1d", fields: tuple[str, ...] = ("open", "close"),
          lockbox: bool = False, today=None, currency: str | None = None,
          dividend_tax: float | None = None, neutralize_jumps: bool = True,
-         reinvest_dividends: bool = True) -> Panel:
+         reinvest_dividends: bool = True, fin_timing: str = "first") -> Panel:
     """symbols: None/"ALL" = 전체. kr_stock은 "KOSPI"/"KOSDAQ"도 받는다 (그날 소속 시장 기준).
     lockbox=False면 end를 dev_end()로 자른다.
     dividend_tax: 배당 재투자 때 떼는 비율 (0이면 전액 재투자).
@@ -103,7 +108,8 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
       reinvest_dividends 배당락일에 세후 배당 재투자 (총수익). False면 예전처럼 가격 수익만.
       neutralize_jumps 가격제한을 넘는 하루 변동을 0으로 (수정계수에 빠진 감자·병합 등). 정리매매 구간은 제외.
       항상 하는 처리: config/kr_exclude.yaml 종목 제외, 코드 재사용 분리, 주식수 기반 병합·감자 보정.
-      panel["tradable"] (거래량 > 0)을 같이 준다 → 엔진이 거래정지일에는 매매하지 않는다."""
+      panel["tradable"] (거래량 > 0)을 같이 준다 → 엔진이 거래정지일에는 매매하지 않는다.
+      fin_timing  재무 필드(FIN_FIELDS)의 공개일: "first"(최초 접수일, 배당과 같은 규칙) | "last"(마지막 접수일 = filed)."""
     cut = dev_end(today)
     if not lockbox:
         end = min(pd.Timestamp(end), cut) if end is not None else cut
@@ -111,6 +117,9 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
     want_div = [f for f in DIV_FIELDS if f in fields]
     if want_div and market not in ("kr_stock", "us_stock"):
         raise ValueError(f"배당 필드 {want_div}는 kr_stock·us_stock만 있다")
+    want_fin = [f for f in FIN_FIELDS if f in fields]
+    if want_fin and market != "kr_stock":
+        raise ValueError(f"재무 필드 {want_fin}는 kr_stock만 있다 (dart_fin)")
     if market == "kr_stock":
         long, meta = _kr(symbols, start, end, fields, neutralize_jumps, dividend_tax, reinvest_dividends)
         fields = fields + ("tradable",)
@@ -130,11 +139,23 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
         long = long.merge(dividend_fields(market, basis), on=["date", "symbol"], how="left")
         meta["dividend_fields"] = DIV_TIMING[market]
         meta["dividend_data"] = dividend_coverage(market)
+    rep_fin = None
+    if want_fin:
+        rep_fin = fin_reports(timing=fin_timing)
+        long = long.merge(fin_fields(long[["date", "symbol"]], rep_fin, want_fin), on=["date", "symbol"], how="left")
+        meta["fin_fields"] = FIN_TIMING[fin_timing]
+        meta["fin_data"] = fin_coverage(rep_fin, fin_timing)
     frames = {f: long.pivot(index="date", columns="symbol", values=f).sort_index() for f in fields if f in long}
+    if want_fin:   # 결측률: 가격이 있는 칸 중 재무 값이 비어 있는 비율
+        has_px = frames["close"].notna()
+        meta["fin_data"]["missing"] = {f: round(float(frames[f].isna()[has_px].sum().sum() / max(has_px.sum().sum(), 1)), 4)
+                                       for f in want_fin}
     meta |= {"dev_end": str(cut.date()), "lockbox": lockbox, "survivorship": SURVIVORSHIP[market],
              "start": str(frames["close"].index[0]), "end": str(frames["close"].index[-1])}
     panel = Panel(frames, market, timeframe, meta)
     panel.div_basis = basis
+    panel.fin_reports = rep_fin
+    panel.fin_basis = long[["date", "symbol"]].reset_index(drop=True) if want_fin else None
     return panel
 
 
@@ -651,6 +672,186 @@ def check_dividend_causality(panel: Panel, n_cuts: int = 3, tol: float = 1e-9) -
     for q in np.linspace(0.4, 0.85, n_cuts):
         cut = idx[int(len(idx) * q)]
         part = dividend_fields(panel.market, b[b["date"] <= cut], asof=cut)
+        bad = 0
+        for f in fields:
+            p = part.pivot(index="date", columns="symbol", values=f)
+            full = panel[f].reindex(index=p.index, columns=p.columns).to_numpy(dtype=float)
+            same = np.isclose(full, p.to_numpy(dtype=float), rtol=tol, atol=tol, equal_nan=True)
+            bad += int((~same).any(axis=1).sum())
+        out["cuts"].append({"cut": str(cut), "mismatch_bars": bad})
+        out["passed"] &= bad == 0
+    return out
+
+
+# ── 재무: dart_fin (kr_stock) ──
+FIN_BS = {  # 필드 이름 → dart_fin 열 (분기말 잔액). equity = 자본총계 (연결이면 비지배지분 포함)
+    "equity": "total_equity", "total_equity": "total_equity", "total_assets": "total_assets",
+    "total_liabilities": "total_liabilities", "current_assets": "current_assets",
+    "current_liabilities": "current_liabilities", "noncurrent_assets": "noncurrent_assets",
+    "noncurrent_liabilities": "noncurrent_liabilities", "capital_stock": "capital_stock",
+    "retained_earnings": "retained_earnings",
+}
+FIN_FLOW = ("revenue", "operating_income", "pretax_income", "net_income")
+FIN_TTM = {f"{c}_ttm": c for c in FIN_FLOW}    # 최근 4개 분기 3개월 값 합 (연결·별도가 섞이면 NaN)
+FIN_FIELDS = tuple(FIN_BS) + tuple(FIN_TTM)
+FIN_STALE_DAYS = 400      # 마지막 공개 뒤 이만큼 새 보고서가 없으면 낡은 값으로 보고 비운다
+FIN_KIND = {"Q1": "분기보고서", "H1": "반기보고서", "Q3": "분기보고서", "FY": "사업보고서"}
+FIN_TIMING = {
+    "first": "dart_fin 최신(정정 반영) 값을 최초 접수일(first_filed) 다음 거래일부터. 최초 접수일이 없으면 filed(정정일일 수 "
+             "있어 더 늦음) 다음 거래일부터. 정정 전 원래 값은 저장돼 있지 않아, 정정된 보고서는 정정 값이 최초 접수일부터 "
+             "보인다(경미한 미래참조). 4분기 = FY − Q3 누적 (사업보고서·3분기보고서 중 늦은 공개일부터)",
+    "last": "dart_fin 값을 filed(마지막 접수일, 정정이면 정정일) 다음 거래일부터 (보수적: 정정된 보고서는 정정 전까지 안 보임). "
+            "4분기 = FY − Q3 누적",
+}
+
+
+def fin_reports(symbols=None, asof=None, timing: str = "first") -> pd.DataFrame:
+    """dart_fin 보고서 1행 = (종목, 분기). 열: symbol, qidx(연*4+분기, 분기말 기준), period, fs_div,
+    src_date(공개일, 현지 날짜), known(이 날짜 봉부터 쓸 수 있음 = src_date 다음 날 → 다음 거래일 봉),
+    flow_known(손익을 쓸 수 있는 날), FIN_BS 원천 열, FIN_FLOW 3개월 값,
+    fallback(최초 접수일이 없어 filed 사용), corrected(최초 접수 뒤 정정됨).
+    FY 행의 손익은 4분기 3개월 값(FY − Q3 누적)으로 바꾼다. 그 flow_known은 사업보고서·3분기보고서 중 늦은 공개일
+    다음 날, 재무상태(known)는 사업보고서 공개일 다음 날. 원화 아닌 보고서는 뺀다.
+    asof: 그날 전에 공개된 행만 (src_date < asof)."""
+    if timing not in FIN_TIMING:
+        raise ValueError(f"fin_timing은 {list(FIN_TIMING)} 중 하나: {timing}")
+    bs = sorted(set(FIN_BS.values()))
+    cols = ["symbol", "qidx", "period", "fs_div", "src_date", "known", "flow_known", *bs, *FIN_FLOW,
+            "fallback", "corrected"]
+    d = store.read("dart_fin", "ALL")
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    d = d[d["currency"].fillna("KRW") == "KRW"].copy()
+    d["symbol"] = d["symbol"].astype(str).str.strip()
+    if symbols not in (None, "ALL", "KOSPI", "KOSDAQ"):
+        d = d[d["symbol"].isin([symbols] if isinstance(symbols, str) else symbols)]
+    for c in [*bs, *FIN_FLOW, *(f"{c}_cum" for c in FIN_FLOW)]:
+        if c not in d:
+            d[c] = np.nan
+    tz = TZ["kr_stock"]
+    qend = _local_date(d["ts"], tz)
+    filed = _local_date(d["filed"], tz)
+    d["qidx"] = qend.dt.year * 4 + (qend.dt.month - 1) // 3
+    d["fallback"], d["corrected"] = True, False
+    src = filed
+    if timing == "first":
+        from ..data.collectors.dividends import first_filed
+        try:
+            ff = first_filed()
+        except ValueError:
+            ff = pd.DataFrame()
+        if not ff.empty and "corp_code" in d:
+            key = d.assign(kind=d["period"].map(FIN_KIND), _p=qend.dt.strftime("%Y.%m"))
+            m = key[["corp_code", "kind", "_p"]].merge(
+                ff.rename(columns={"period": "_p"})[["corp_code", "kind", "_p", "first_filed"]],
+                on=["corp_code", "kind", "_p"], how="left")
+            first = _local_date(pd.to_datetime(m["first_filed"], utc=True), tz)
+            first.index = d.index
+            use = first.notna() & (first <= filed)          # 최초 접수일이 filed보다 늦으면 잘못 붙은 것 → filed
+            src = first.where(use, filed)
+            d["fallback"], d["corrected"] = ~use, use & (first < filed)
+    d["src_date"] = src
+    rows = d[["symbol", "bsns_year", "period", "qidx", "fs_div", "src_date", "fallback", "corrected", *bs,
+              *FIN_FLOW, *(f"{c}_cum" for c in FIN_FLOW)]]
+    rows = rows.drop_duplicates(["symbol", "qidx"], keep="last")
+    # 4분기: 사업보고서 값(연간) − 같은 사업연도 3분기 누적. 3분기보고서가 없으면 3개월 값을 모른다(NaN)
+    # 손익(flow)은 사업보고서·3분기보고서 중 늦은 공개일부터 (flow_known), 재무상태는 사업보고서 공개일부터 (known)
+    fy = rows[rows["period"] == "FY"]
+    q3 = rows[rows["period"] == "Q3"].drop_duplicates(["symbol", "bsns_year"], keep="last")
+    m = fy[["symbol", "bsns_year"]].merge(q3, on=["symbol", "bsns_year"], how="left", suffixes=("", "_q3"))
+    m.index = fy.index
+    rows = rows.copy()
+    rows["flow_src"] = rows["src_date"]
+    for c in FIN_FLOW:
+        rows.loc[fy.index, c] = fy[c] - m[f"{c}_cum"]
+    later = m["src_date"].notna() & (m["src_date"] > fy["src_date"])
+    rows.loc[fy.index[later], "flow_src"] = m.loc[later, "src_date"]
+    rows.loc[fy.index[m["src_date"].isna()], "flow_src"] = pd.NaT    # 3분기보고서가 없으면 4분기 손익은 알 수 없음
+    rows["known"] = rows["src_date"] + pd.Timedelta(days=1)
+    rows["flow_known"] = rows["flow_src"] + pd.Timedelta(days=1)
+    if asof is not None:
+        rows = rows[rows["src_date"] < pd.Timestamp(asof)]
+    return rows[cols].sort_values(["symbol", "qidx"]).reset_index(drop=True)
+
+
+def _fin_ttm(rep: pd.DataFrame) -> pd.DataFrame:
+    """분기 행마다 그 분기까지 4개 분기 합(TTM). known = 네 분기 중 가장 늦게 공개된 날.
+    네 분기 보고서가 다 있어야 행이 생기고, 연결·별도 구분이 섞이면 값은 NaN (값 누락이면 합도 NaN)."""
+    rep = rep.drop(columns="known").rename(columns={"flow_known": "known"})
+    acc = rep[["symbol", "qidx", "fs_div", "known"]].copy()
+    ok = pd.Series(True, index=acc.index)
+    have = acc["known"].notna()
+    for c in FIN_FLOW:
+        acc[c] = rep[c].to_numpy(dtype=float)
+    for lag in (1, 2, 3):
+        p = rep[["symbol", "qidx", "fs_div", "known", *FIN_FLOW]].assign(qidx=rep["qidx"] + lag)
+        m = acc[["symbol", "qidx"]].merge(p, on=["symbol", "qidx"], how="left")
+        m.index = acc.index
+        for c in FIN_FLOW:
+            acc[c] = acc[c] + m[c]
+        have &= m["known"].notna()
+        ok &= m["fs_div"] == acc["fs_div"]
+        acc["known"] = acc["known"].where(m["known"].isna() | (m["known"] <= acc["known"]), m["known"])
+    for c in FIN_FLOW:
+        acc[c] = acc[c].where(ok)
+    # 분기가 빠진 행은 언제 다 모일지 모르므로 이벤트로 두지 않는다 (직전 TTM이 FIN_STALE_DAYS 안에서 유지)
+    acc = acc[have]
+    return acc.rename(columns={c: f"{c}_ttm" for c in FIN_FLOW}).drop(columns="fs_div")
+
+
+def _fin_asof(bars: pd.DataFrame, ev: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """bars(date, base)마다 그날까지 공개된 가장 최근 분기(qidx 최대)의 값. 늦게 공개된 옛 분기는 새 분기를 덮지 않는다."""
+    ev = ev.sort_values(["symbol", "known", "qidx"])
+    ev = ev[ev["qidx"] >= ev.groupby("symbol")["qidx"].cummax()]
+    ev = ev.drop_duplicates(["symbol", "known"], keep="last").sort_values("known")
+    ev = ev[["symbol", "known", *cols]].rename(columns={"symbol": "base"})
+    return pd.merge_asof(bars, ev, left_on="date", right_on="known", by="base", direction="backward",
+                         tolerance=pd.Timedelta(days=FIN_STALE_DAYS))
+
+
+def fin_fields(basis: pd.DataFrame, rep: pd.DataFrame, fields) -> pd.DataFrame:
+    """basis(date, symbol) 날짜·종목마다 그날 알 수 있는 재무 값. 반환: date, symbol, *fields.
+    코드 재사용으로 나뉜 앞 상장(코드@날짜)도 원래 코드의 보고서를 쓴다 (FIN_STALE_DAYS로 낡은 값은 비움)."""
+    fields = list(fields)
+    bars = basis[["date", "symbol"]].assign(base=basis["symbol"].str.split("@").str[0]).sort_values("date")
+    out = bars.copy()
+    bs = [f for f in fields if f in FIN_BS]
+    if bs:
+        src = sorted({FIN_BS[f] for f in bs})
+        m = _fin_asof(bars, rep[["symbol", "qidx", "known", *src]], src)
+        for f in bs:
+            out[f] = m[FIN_BS[f]].to_numpy()
+    ttm = [f for f in fields if f in FIN_TTM]
+    if ttm:
+        m = _fin_asof(bars, _fin_ttm(rep), ttm)
+        for f in ttm:
+            out[f] = m[f].to_numpy()
+    return out[["date", "symbol", *fields]]
+
+
+def fin_coverage(rep: pd.DataFrame, timing: str) -> dict:
+    """실행 시점 재무 원천 범위 (백필·정정으로 결과가 바뀌므로 report에 남긴다)."""
+    if rep.empty:
+        return {"rows": 0, "timing": timing}
+    raw = store.read("dart_fin", "ALL")
+    return {"rows": len(rep), "symbols": int(rep["symbol"].nunique()), "timing": timing,
+            "first": str(rep["src_date"].min().date()), "last": str(rep["src_date"].max().date()),
+            "fallback": int(rep["fallback"].sum()), "corrected": int(rep["corrected"].sum()),
+            "non_krw_skipped": int((raw["currency"].fillna("KRW") != "KRW").sum()) if "currency" in raw else 0}
+
+
+def check_fin_causality(panel: Panel, n_cuts: int = 3, tol: float = 1e-9) -> dict:
+    """재무 필드 미래참조 검사: 중간 날짜 cut에서 '그날 전에 공개된 보고서'만으로 다시 만든 값이
+    전체로 만든 panel 값과 cut까지 같아야 한다 (공개 당일이나 분기말부터 보이게 하면 어긋난다)."""
+    fields = [f for f in FIN_FIELDS if f in panel]
+    out = {"passed": True, "fields": fields, "cuts": []}
+    if not fields or panel.fin_reports is None or panel.fin_basis is None:
+        return out
+    idx, basis = panel.index, panel.fin_basis
+    for q in np.linspace(0.4, 0.85, n_cuts):
+        cut = idx[int(len(idx) * q)]
+        rep = panel.fin_reports
+        part = fin_fields(basis[basis["date"] <= cut], rep[rep["src_date"] < cut], fields)
         bad = 0
         for f in fields:
             p = part.pivot(index="date", columns="symbol", values=f)

@@ -55,6 +55,20 @@ def generate_trades(data, params: dict) -> pd.DataFrame:
     raise NotImplementedError
 
 
+def valuation(data) -> dict[str, pd.DataFrame]:
+    """[예시] 재무 필드로 만드는 가치 지표 (kr_stock). lab.yaml fields: [market_cap, equity, net_income_ttm].
+    모두 그날 알 수 있는 값이라 그대로 신호에 써도 된다. 자본·이익이 0 이하인 칸은 비율이 뜻이 없어 NaN으로 둔다.
+        pbr = 시가총액 / 자본총계,  per = 시가총액 / 순이익(TTM),  roe = 순이익(TTM) / 자본총계
+    주의: market_cap은 그날 종가 기준, equity는 최근 공개 분기말 값이다 (최대 몇 달 차이).
+    연결 재무의 자본·순이익은 비지배지분을 포함한다 (지배주주 몫만 따로 있지 않음).
+    필요 없으면 지운다."""
+    eq = data.equity.where(data.equity > 0)
+    ni = data.net_income_ttm
+    return {"pbr": data.market_cap / eq,
+            "per": data.market_cap / ni.where(ni > 0),
+            "roe": ni / eq}
+
+
 # 선택: 학습 창 데이터로 파라미터를 고르는 경우에만 정의한다. 워크포워드가 창마다 호출한다.
 # def fit(train_data, params: dict) -> dict:
 #     return params

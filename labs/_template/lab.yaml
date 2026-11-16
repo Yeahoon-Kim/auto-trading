@@ -39,6 +39,16 @@ fields: []               # open·close 외에 필요한 것: high, low, volume, 
                          #         우선주는 첫 우선주(예: 005935)만 값이 있다. 2우선 이하·파싱 누락은 비어 있음(NaN, 0 아님)
                          #     US: 직전 365일 정기 현금배당 합계, 배당락일부터 (us_1d close 기준, USD)
                          #   배당 필드는 엔진이 데이터를 잘라 다시 만들어 시점을 자동 검사한다 (기준 7)
+                         #   재무(kr_stock, dart_fin, 원): 공개일 다음 거래일부터 보이는 최신 값
+                         #     재무상태(최근 분기말): equity(자본총계, 연결이면 비지배지분 포함), total_assets, total_liabilities,
+                         #       current_assets, current_liabilities, noncurrent_assets, noncurrent_liabilities, capital_stock, retained_earnings
+                         #     손익 TTM(최근 4개 분기 3개월 값 합, 4분기 = 연간 − 3분기 누적): revenue_ttm, operating_income_ttm,
+                         #       pretax_income_ttm, net_income_ttm. 4개 분기가 다 없거나 연결·별도가 섞이면 NaN
+                         #     PBR·PER·ROE는 market_cap과 같이 받아 strategy.py에서 계산 (예시: valuation())
+                         #     재무 필드도 엔진이 시점을 자동 검사한다. report에 원천 범위·결측률이 남는다
+fin_timing: first        # 재무 공개일: first = 최초 접수일 (배당과 같은 규칙, 정정 값이 최초 접수일부터 보이는 경미한 미래참조)
+                         #             last  = 마지막 접수일 filed (보수적, 정정된 보고서는 정정일까지 안 보임)
+                         #   dart_fin은 정정 전 원래 값을 저장하지 않는다. 결과가 둘 사이에서 크게 다르면 validator에 알린다
 fill: next_open          # next_open (다음 봉 시가 체결) | next_close (다음 봉 종가)
 currency: ""             # us_stock: KRW면 그날 원/달러(ECOS)로 환산해 환율 변동까지 수익에 넣음
 dividend_tax:            # 배당 재투자 때 떼는 비율 (0이면 전액). 비우면 us_stock 원천징수 15%, kr_stock 배당소득세 15.4%
