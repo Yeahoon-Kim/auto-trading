@@ -175,3 +175,15 @@ def test_report_states_kr_dividend_reinvestment():
     off = {"market": "kr_stock", "data": {"dividends": {"reinvested": False}}}
     assert "KR 배당 재투자 반영: 예" in _dividend_line(on) and "15.4%" in _dividend_line(on)
     assert "**아니오**" in _dividend_line(off) and "**아니오**" in _dividend_line({"market": "kr_stock", "data": {}})
+
+
+def test_report_states_dividend_data_range(tmp_store):
+    from autotrader.backtest.lab import report
+    _write_kr([10000.0] * 10)
+    _write_dart(first_filed=None)
+    p = _kr(fields=("dps",))
+    cov = p.meta["dividend_data"]
+    assert cov["years"] == {2023: 1} and cov["filed_fallback"] == 1
+    s = {"lab": "L", "run_at": "-", "market": "kr_stock", "data": p.meta, "checks": [],
+         "test": {}, "costs": {"fee_pct": 0, "slippage_pct": 0, "tax_pct_sell": 0}}
+    assert "실행 시점 배당 데이터 범위: 사업연도별 행 수 2023 1" in report(s)

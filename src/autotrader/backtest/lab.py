@@ -363,6 +363,13 @@ def report(s: dict) -> str:
     lines.append(_dividend_line(s))
     if s["data"].get("dividend_fields"):
         lines.append(f"- 배당 필드 시점: {s['data']['dividend_fields']}")
+        cov = s["data"].get("dividend_data") or {}
+        if cov.get("years"):
+            yrs = ", ".join(f"{y} {n:,}" for y, n in cov["years"].items())
+            lines.append(f"- 실행 시점 배당 데이터 범위: 사업연도별 행 수 {yrs} (보고서 접수 {cov['first']}~{cov['last']}). "
+                         f"최초 접수일 없어 정정일로 시점을 잡은 행 {cov['filed_fallback']:,}개, 금액 모름 {cov['dps_unknown']:,}개")
+        elif cov.get("rows"):
+            lines.append(f"- 실행 시점 배당 데이터 범위: {cov['rows']:,}건, 배당락 {cov['first']}~{cov['last']}")
     if "causality" in s:
         c = s["causality"]
         df = c.get("dividend_fields") or {}
@@ -434,7 +441,8 @@ def _dividend_line(s: dict) -> str:
         if not v.get("reinvested"):
             return "- KR 배당 재투자 반영: **아니오** (가격 수익만 — 고배당 종목일수록 수익이 낮게 나옴)"
         return (f"- KR 배당 재투자 반영: 예 (kr_dividend_schedule 배당락일, 배당소득세 {v['tax']:.1%} 차감 후 재투자, "
-                f"{v.get('events', 0):,}건·{v.get('symbols', 0):,}종목, 가격 없어 건너뜀 {v.get('skipped_no_price', 0)}건)")
+                f"{v.get('events', 0):,}건·{v.get('symbols', 0):,}종목, 가격 없어 건너뜀 {v.get('skipped_no_price', 0)}건"
+                + (f", 실행 시점 배당 일정 범위 {v['ex_range']}" if v.get("ex_range") else "") + ")")
     if market == "us_stock":
         return f"- US 배당 재투자 반영: 예 (us_1d adj_close, 원천징수 {d.get('dividend_tax', 0):.1%} 차감 후 재투자)"
     return "- 배당: 해당 없음"

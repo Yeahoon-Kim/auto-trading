@@ -129,6 +129,7 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
         basis = _div_basis(long, market)
         long = long.merge(dividend_fields(market, basis), on=["date", "symbol"], how="left")
         meta["dividend_fields"] = DIV_TIMING[market]
+        meta["dividend_data"] = dividend_coverage(market)
     frames = {f: long.pivot(index="date", columns="symbol", values=f).sort_index() for f in fields if f in long}
     meta |= {"dev_end": str(cut.date()), "lockbox": lockbox, "survivorship": SURVIVORSHIP[market],
              "start": str(frames["close"].index[0]), "end": str(frames["close"].index[-1])}
@@ -259,6 +260,7 @@ def _kr_reinvest(px: pd.DataFrame, tax: float) -> dict:
     meta = {"reinvested": True, "tax": tax, "source": "kr_dividend_schedule ex_date·dps"}
     if ev.empty:
         return meta | {"events": 0, "skipped_no_price": 0}
+    meta["ex_range"] = f"{ev['ex_date'].min().date()}~{ev['ex_date'].max().date()}"   # 실행 시점 원천 범위
     rows = px[["date", "symbol"]].assign(base=px["symbol"].str.split("@").str[0], row=np.arange(len(px)))
     ev = ev.rename(columns={"symbol": "base"})
     ev = ev[ev["base"].isin(set(rows["base"]))].sort_values("ex_date")
@@ -580,6 +582,20 @@ def _kr_pref_rows(dv: pd.DataFrame) -> pd.DataFrame:
     out = dv.merge(m, left_on="symbol", right_on="_common")
     out = out.assign(symbol=out["_pref"], dps=_dps_or_zero(out, out["dps_pref"])).drop(columns=["_pref", "_common"])
     return out.drop_duplicates(["symbol", "corp_code", "bsns_year"])
+
+
+def dividend_coverage(market: str) -> dict:
+    """실행 시점 배당 원천 범위 (백필 중이면 결과가 데이터와 함께 바뀌므로 report에 남긴다)."""
+    ev = dividends(market)
+    if ev.empty:
+        return {"rows": 0}
+    out = {"rows": len(ev), "first": str(ev["src_date"].min().date()), "last": str(ev["src_date"].max().date())}
+    if market == "kr_stock":
+        n = ev.groupby("year").size()
+        out |= {"years": {int(k): int(v) for k, v in n.items()},
+                "filed_fallback": int(ev["filed_fallback"].sum()),   # 최초 접수일이 없어 정정일로 잡은 행
+                "dps_unknown": int(ev["dps"].isna().sum())}         # 파싱 누락 등으로 금액을 모르는 행
+    return out
 
 
 def _div_basis(long: pd.DataFrame, market: str) -> pd.DataFrame:
