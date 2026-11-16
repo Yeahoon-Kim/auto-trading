@@ -121,6 +121,9 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   - 기간: 10-Q에는 3개월 값과 연초 누계(YTD)가 같이 있다 (`start`로 구분). 4분기 보고서는 없으므로 4분기 = 10-K 연간 − 3분기 누계. 회계연도가 달력과 다른 회사가 많다 (AAPL 9월 말).
   - 태그: 같은 항목도 회사·연도마다 태그가 다르다 (매출: Revenues → RevenueFromContractWithCustomer…). 기간마다 `tag_rank`가 가장 작은 행을 쓴다. `net_income`의 1순위 `NetIncomeLoss`는 지배주주 귀속 순이익이다.
   - 주식수: `shares_outstanding`의 1순위 `dei:EntityCommonStockSharesOutstanding`은 표지 기준일(공시 직전) 값, `us-gaap:CommonStockSharesOutstanding`은 기간 말 값이다. 클래스가 여러 개인 회사(GOOG/GOOGL, BRK)는 클래스별로 나뉘거나 합계만 있을 수 있다. GOOG·GOOGL처럼 같은 CIK면 같은 사실이 두 종목에 다 들어간다.
+  - 실제 JSON (2026-11-16 확인): fact 항목 = `start`(기간 항목만), `end`, `val`, `accn`, `fy`, `fp`, `form`, `filed`, `frame`(일부만). 정정 공시(10-K/A·10-Q/A)도 들어 있다 (AAPL 받는 항목 중 10-K/A 25행). 8-K 사실도 있다 (실적 발표 첨부 등).
+  - 시작 시점: 유니버스 515개사의 첫 10-K·10-Q XBRL 공시일은 2009-04-15가 가장 이르고, 2009년 239개사·2010년 140개사·2011년 34개사이며 나머지는 상장·분사 시점(중앙값 2010-07). 첫 공시의 비교 재무제표 덕분에 기간 끝은 그보다 앞선 값도 있다 (가장 이른 기간 끝 1989-12-31, 드묾).
+  - 대량 파일 검토: `companyfacts.zip`(매일 밤 재생성)은 1.43GB, 전체 20,588개사, 해제 시 19.5GB. 우리 유니버스 515개사는 해제 1.95GB, 압축 0.14GB(JSON 읽기 19초). 회사별 API도 gzip으로 오므로 515회 호출(초당 5회, 약 2분)이 약 0.14GB라 zip(1.43GB)보다 10배 적다 → **회사별 API 유지**. 유니버스를 시장 전체(생존편향 해소)로 넓히면 그때 zip 백필이 낫다.
   - 범위: 현재 구성종목만이라 **생존편향**이 있다. us-gaap만 받으므로 IFRS로 내는 외국 회사(20-F/40-F 중 IFRS)는 비어 있다 (ASML은 US GAAP라 있음). 8-K로만 나온 사실은 30일 주기 재수집 때 들어온다.
 - **legacy 재무제표 (US)**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다. 같은 기간 중복과 9개월 누적 행이 섞여 있다.
 - **legacy US 일봉**: 분할 반영 가격이고 상장폐지 종목이 없다 (생존편향).
