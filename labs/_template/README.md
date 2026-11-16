@@ -10,8 +10,19 @@
 - 출처 (책, 논문, 기법):
 - 진입 규칙:
 - 청산 규칙:
-- 포지션 크기:
+- 실행 유형 (`lab.yaml` `type`): portfolio(목표 비중) / trade(진입 신호)
+- 포지션 크기: portfolio면 비중 규칙, trade면 `lab.yaml` `trade` 블록 값(거래당 위험·heat·종목 비중·보유 종목 수)
 - 파라미터:
+
+> **신호형(`type: trade`)으로 쓸 때**: `strategy.py`의 `generate_trades`가 봉마다 진입 신호(종목·방향·손절가·목표가·
+> 지정가·당일 청산)를 낸다. 백테스트는 데스크와 같은 코드(`risk.guards.make_plan` → `sizing.size` → `check_position`)를
+> 과거 봉의 시가·고가·저가·종가로 재생한다 (`src/autotrader/backtest/trade.py`).
+> - 진입: 다음 봉 시가 (지정가면 다음 봉 하루짜리, 안 닿으면 버림)
+> - 청산 판정 순서: 시가 갭 → 손절(불리한 극값) → 목표가(유리한 극값) → 당일 청산.
+>   당일 청산은 분봉이면 마감 N분 전(`risk.yaml` `flat_before_close_min`) 봉의 종가, 일봉이면 그날 종가(근사).
+>   **같은 봉에서 손절과 목표가가 둘 다 닿으면 손절**로 친다. 시가가 손절가를 건너뛰면 시가에 청산(−1R보다 나쁨).
+> - 결과에 거래 기록(`test_trades.csv`), 승률·평균 R·청산 종류·수량을 묶은 한도·진입 못 한 신호 사유가 나온다.
+> - 1회 주문 상한(`risk.yaml` `orders.max_order_value_krw`)도 데스크처럼 적용되므로, 자본(`execution.capital`)에 따라 결과가 달라질 수 있다.
 
 ## 3. 백테스트 (워크포워드)
 - 시도 횟수: `lab.yaml`의 `trials` — 개발 구간 결과를 볼 때마다(파라미터만 바꾼 재실행 포함) 실행 **전에** `count` +1, `log`에 한 줄, 커밋.
