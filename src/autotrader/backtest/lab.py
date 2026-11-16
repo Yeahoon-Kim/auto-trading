@@ -27,7 +27,7 @@ import pandas as pd
 import yaml
 
 from . import benchmark, engine, trade
-from .data import Panel, dev_end, load
+from .data import Panel, check_dividend_causality, dev_end, load
 
 REGIME_COL = {"kr_stock": "kospi_trend", "us_stock": "spx_trend",
               "crypto_spot": "btc_trend", "crypto_futures": "btc_trend"}
@@ -186,6 +186,8 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
     wfrun = R.walk_forward
 
     causal = R.causality(params)
+    causal["dividend_fields"] = check_dividend_causality(panel)   # 배당 필드 자체의 시점 (필드가 없으면 통과)
+    causal["passed"] = causal["passed"] and causal["dividend_fields"]["passed"]
     base = wfrun(params)
     test = base["test"]
     rf = _rf(panel, test.returns.index)
@@ -275,6 +277,7 @@ def open_lockbox(lab_dir: Path) -> dict:
     dev_mdd = dev["test"]["mdd"]
     ok = m["total_return"] >= 0 and abs(m["mdd"]) <= 1.5 * abs(dev_mdd)
     summary = {"lab": lab_dir.name, "version": cfg.get("version"), "run_at": datetime.now().isoformat(timespec="seconds"),
+               "market": cfg["market"],
                "lockbox": {"start": str(cut.date()), "end": panel.meta["end"]}, "params": p,
                "costs": engine.asdict(costs), "data": panel.meta, "test": _clean(m),
                "execution": ex, "money": _clean(res.money()),
@@ -357,10 +360,16 @@ def report(s: dict) -> str:
                      f"(수정계수에 빠진 감자·병합 등). 상장폐지 직전 정리매매 {j.get('kept_delisting_tail', 0)}건은 실제 손실로 유지")
     if s["data"].get("rows_without_adj_factor"):
         lines.append(f"- 수정계수 없는 행 {s['data']['rows_without_adj_factor']:,}개 (원본가 사용)")
+    lines.append(_dividend_line(s))
+    if s["data"].get("dividend_fields"):
+        lines.append(f"- 배당 필드 시점: {s['data']['dividend_fields']}")
     if "causality" in s:
         c = s["causality"]
+        df = c.get("dividend_fields") or {}
         lines.append(f"- 미래참조 자동 검사: {'통과' if c['passed'] else '**실패**'} "
-                     f"(데이터를 {len(c['cuts'])}곳에서 잘라 다시 계산한 신호 비교)")
+                     f"(데이터를 {len(c['cuts'])}곳에서 잘라 다시 계산한 신호 비교"
+                     + (f"; 배당 필드 {', '.join(df['fields'])} 재구성 비교 "
+                        f"{'통과' if df['passed'] else '**실패**'}" if df.get("fields") else "") + ")")
         lines.append(f"- 가설 커밋 상태: {s.get('hypothesis_committed')}")
     lines += ["", "## 결과 (비용 포함)",
               f"- 총수익 {_fmt(t.get('total_return'))}, CAGR {_fmt(t.get('cagr'))}, Sharpe {_fmt(t.get('sharpe'))} "
@@ -413,8 +422,22 @@ def report(s: dict) -> str:
         lines += ["", "## 국면별 (참고, 전날 추세 라벨)"]
         lines += [f"- {k}: {v['bars']}봉, Sharpe {v['sharpe']:.2f}, 수익 {v['total_return']:.2%}"
                   for k, v in s["regimes"].items()]
-    lines += ["", "반영 안 한 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격, 양도소득세·배당세, 현금 이자."]
+    lines += ["", "반영 안 한 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격, 양도소득세, 현금 이자."]
     return "\n".join(lines) + "\n"
+
+
+def _dividend_line(s: dict) -> str:
+    """배당 재투자 반영 여부 한 줄 (KR은 항상 적는다 — 예전 결과와 구분하려고)."""
+    d, market = s["data"], s.get("market")
+    if market == "kr_stock":
+        v = d.get("dividends") or {}
+        if not v.get("reinvested"):
+            return "- KR 배당 재투자 반영: **아니오** (가격 수익만 — 고배당 종목일수록 수익이 낮게 나옴)"
+        return (f"- KR 배당 재투자 반영: 예 (kr_dividend_schedule 배당락일, 배당소득세 {v['tax']:.1%} 차감 후 재투자, "
+                f"{v.get('events', 0):,}건·{v.get('symbols', 0):,}종목, 가격 없어 건너뜀 {v.get('skipped_no_price', 0)}건)")
+    if market == "us_stock":
+        return f"- US 배당 재투자 반영: 예 (us_1d adj_close, 원천징수 {d.get('dividend_tax', 0):.1%} 차감 후 재투자)"
+    return "- 배당: 해당 없음"
 
 
 def _write(out: Path, summary: dict) -> None:

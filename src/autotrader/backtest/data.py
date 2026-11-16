@@ -6,8 +6,12 @@
 시장별 원천과 처리
 - kr_stock  : krx_1d (KRX 전 종목, 상장폐지 포함 → 생존편향 없음). 가격은 kr_adj_factor로 수정주가 환산.
               수정계수가 없는 종목·날짜는 원본가 그대로 (분할·증자 날 가짜 수익이 생길 수 있음 → meta에 개수 기록).
+              kr_adj_factor에는 배당이 없어서, kr_dividend_schedule 배당락일에 세후 배당금을 재투자한 것으로
+              가격을 보정한다 (총수익, meta["dividends"]).
               raw_close(원본 종가), market_cap, value(거래대금)도 필요하면 fields로 받는다.
 - us_stock  : us_1d (현재 수집 종목 = 지금 살아 있는 종목 → 생존편향 있음). adj_close/close 비율로 OHLC 수정.
+- 배당 신호 필드 (kr_stock·us_stock, fields에 적으면): dps(그날 알 수 있는 주당배당금), div_yield(dps / raw_close).
+              시점 규칙은 dividends() 참고. check_dividend_causality()가 데이터를 잘라 다시 만든 값과 비교한다.
 - crypto_spot / crypto_futures : binance_spot_1m / binance_um_1m을 timeframe(1d, 1h …)으로 묶음. UTC 기준.
               선물 펀딩비는 엔진에 반영하지 않는다 (필요하면 binance_um_funding을 lab에서 직접 읽어 신호·비용에 넣는다).
 
@@ -41,6 +45,7 @@ class Panel(dict):
         super().__init__(frames)
         self.market, self.timeframe = market, timeframe
         self.meta = meta or {}
+        self.div_basis: pd.DataFrame | None = None   # 배당 필드를 다시 만드는 재료 (check_dividend_causality용)
 
     def __getattr__(self, name):
         try:
@@ -85,13 +90,17 @@ def dev_end(today=None) -> pd.Timestamp:
 def load(market: str, symbols: list[str] | str | None = None, start=None, end=None,
          timeframe: str = "1d", fields: tuple[str, ...] = ("open", "close"),
          lockbox: bool = False, today=None, currency: str | None = None,
-         dividend_tax: float | None = None, neutralize_jumps: bool = True) -> Panel:
+         dividend_tax: float | None = None, neutralize_jumps: bool = True,
+         reinvest_dividends: bool = True) -> Panel:
     """symbols: None/"ALL" = 전체. kr_stock은 "KOSPI"/"KOSDAQ"도 받는다 (그날 소속 시장 기준).
     lockbox=False면 end를 dev_end()로 자른다.
+    dividend_tax: 배당 재투자 때 떼는 비율 (0이면 전액 재투자).
+      us_stock 기본 settings us_stock.dividend_withholding_pct, kr_stock 기본 settings kr_stock.dividend_tax_pct
+      (없으면 15.4% = 소득세 14% + 지방세 1.4%).
     us_stock 전용:
       currency="KRW"  가격을 그날 원/달러(ECOS)로 환산 → 수익에 환율 변동 포함. close_usd·fx 필드가 같이 온다.
-      dividend_tax    배당 재투자 때 떼는 비율 (기본: settings us_stock.dividend_withholding_pct, 0이면 전액 재투자).
     kr_stock 전용:
+      reinvest_dividends 배당락일에 세후 배당 재투자 (총수익). False면 예전처럼 가격 수익만.
       neutralize_jumps 가격제한을 넘는 하루 변동을 0으로 (수정계수에 빠진 감자·병합 등). 정리매매 구간은 제외.
       항상 하는 처리: config/kr_exclude.yaml 종목 제외, 코드 재사용 분리, 주식수 기반 병합·감자 보정.
       panel["tradable"] (거래량 > 0)을 같이 준다 → 엔진이 거래정지일에는 매매하지 않는다."""
@@ -99,8 +108,11 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
     if not lockbox:
         end = min(pd.Timestamp(end), cut) if end is not None else cut
     fields = tuple(dict.fromkeys(("open", "close") + tuple(fields)))
+    want_div = [f for f in DIV_FIELDS if f in fields]
+    if want_div and market not in ("kr_stock", "us_stock"):
+        raise ValueError(f"배당 필드 {want_div}는 kr_stock·us_stock만 있다")
     if market == "kr_stock":
-        long, meta = _kr(symbols, start, end, fields, neutralize_jumps)
+        long, meta = _kr(symbols, start, end, fields, neutralize_jumps, dividend_tax, reinvest_dividends)
         fields = fields + ("tradable",)
     elif market == "us_stock":
         long, meta = _us(symbols, start, end, fields, currency, dividend_tax)
@@ -112,10 +124,17 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
         raise ValueError(f"지원하지 않는 시장: {market}")
     if long.empty:
         raise ValueError(f"{market} 데이터 없음 (symbols={symbols}, {start}~{end})")
+    basis = None
+    if want_div:
+        basis = _div_basis(long, market)
+        long = long.merge(dividend_fields(market, basis), on=["date", "symbol"], how="left")
+        meta["dividend_fields"] = DIV_TIMING[market]
     frames = {f: long.pivot(index="date", columns="symbol", values=f).sort_index() for f in fields if f in long}
     meta |= {"dev_end": str(cut.date()), "lockbox": lockbox, "survivorship": SURVIVORSHIP[market],
              "start": str(frames["close"].index[0]), "end": str(frames["close"].index[-1])}
-    return Panel(frames, market, timeframe, meta)
+    panel = Panel(frames, market, timeframe, meta)
+    panel.div_basis = basis
+    return panel
 
 
 def _bounds(start, end, tz: str) -> str:
@@ -156,7 +175,7 @@ def _local_date(ts: pd.Series, tz: str) -> pd.Series:
     return ts.dt.tz_convert(tz).dt.tz_localize(None).dt.normalize()
 
 
-def _kr(symbols, start, end, fields, neutralize_jumps=True):
+def _kr(symbols, start, end, fields, neutralize_jumps=True, dividend_tax=None, reinvest_dividends=True):
     tz = TZ["kr_stock"]
     if symbols in ("KOSPI", "KOSDAQ"):
         sym_where = f"market = '{symbols}'"
@@ -194,17 +213,70 @@ def _kr(symbols, start, end, fields, neutralize_jumps=True):
     nonpos = int((px["factor"] <= 0).sum())
     f = fac.groupby(g).ffill().groupby(g).bfill().fillna(1.0)  # 없는 날은 직전(없으면 다음) 계수, 그것도 없으면 1
     px["raw_close"] = px["close"]
+    px["_f"] = f                                     # 배당 필드의 주식 기준 환산용
     for c in ("open", "close", "high", "low"):
         if c in px:
             px[c] = px[c].where(px[c] > 0) * f          # 거래정지일 가격 0 → 결측
+    if dividend_tax is None:
+        dividend_tax = _settings()["markets"]["kr_stock"].get("dividend_tax_pct", KR_DIVIDEND_TAX_PCT) / 100
+    divs = _kr_reinvest(px, dividend_tax) if reinvest_dividends else {"reinvested": False}
     share_events = _fix_share_events(px)
     jumps = _neutralize_jumps(px) if neutralize_jumps else {"neutralized": 0}
     px["tradable"] = px["volume"] > 0          # 거래량 0 = 거래정지·무거래 (KRX는 종가를 직전 값으로 채운다)
     px = px.drop(columns=[c for c in ("shares", "volume") if c not in fields])
-    return px, {"source": "krx_1d + kr_adj_factor", "rows": len(px), "excluded": len(excl),
+    src = "krx_1d + kr_adj_factor" + (" + kr_dividend_schedule (배당 재투자)" if divs["reinvested"] else "")
+    return px, {"source": src, "rows": len(px), "excluded": len(excl),
                 "untradable_rows": int((~px["tradable"]).sum()), "rows_without_adj_factor": missing,
                 "adj_factor_nonpositive": nonpos, "reused_codes": reused, "share_events": share_events,
-                "jumps": jumps}
+                "jumps": jumps, "dividends": divs}
+
+
+KR_DIVIDEND_TAX_PCT = 15.4   # 배당소득세 14% + 지방소득세 1.4% (settings kr_stock.dividend_tax_pct가 없을 때)
+
+
+def _kr_dividend_events(trading_days: pd.DatetimeIndex) -> pd.DataFrame:
+    """kr_dividend_schedule → (symbol, ex_date, dps). dps = 배당락일 기준 원본 주당 현금배당(원).
+    ex_date가 비어 있으면 panel 거래일로 다시 계산. 같은 종목·배당락일 중복(0원 중복 행 등)은 큰 값 하나만."""
+    s = store.read("kr_dividend_schedule", "ALL")
+    if s.empty:
+        return pd.DataFrame(columns=["symbol", "ex_date", "dps"])
+    s = s[s["dps"] > 0].copy()
+    na = s["ex_date"].isna()
+    if na.any():
+        from ..data.collectors.dividends import ex_dates
+        rec = _local_date(s.loc[na, "ts"], TZ["kr_stock"])
+        s.loc[na, "ex_date"] = ex_dates(rec, trading_days).to_numpy()
+    s = s.dropna(subset=["ex_date"])
+    return s.groupby(["symbol", "ex_date"], as_index=False)["dps"].max()
+
+
+def _kr_reinvest(px: pd.DataFrame, tax: float) -> dict:
+    """배당락일 수익에 세후 배당을 더한다 (px를 고친다, 종목·날짜순 전제).
+    그날 총수익 = (종가 + 세후 배당) / 전일 종가 → 그날 이전 가격 전체에 종가 / (종가 + 세후 배당)을 곱한다.
+    배당금과 종가는 둘 다 그날 원본 주식 기준이라 수정계수와 무관하다. 최근 가격은 그대로 (US adj_close와 같은 방식).
+    배당락일에 행이 없으면(휴장 등) 7일 안의 다음 행에 붙인다. 코드 재사용으로 나뉜 앞 상장(코드@날짜)도 원래 코드로 맞춘다."""
+    ev = _kr_dividend_events(pd.DatetimeIndex(px["date"].unique()))
+    meta = {"reinvested": True, "tax": tax, "source": "kr_dividend_schedule ex_date·dps"}
+    if ev.empty:
+        return meta | {"events": 0, "skipped_no_price": 0}
+    rows = px[["date", "symbol"]].assign(base=px["symbol"].str.split("@").str[0], row=np.arange(len(px)))
+    ev = ev.rename(columns={"symbol": "base"})
+    ev = ev[ev["base"].isin(set(rows["base"]))].sort_values("ex_date")
+    m = pd.merge_asof(ev, rows.sort_values("date"), left_on="ex_date", right_on="date", by="base",
+                      direction="forward", tolerance=pd.Timedelta(days=7)).dropna(subset=["row"])
+    pos = m["row"].astype(int).to_numpy()
+    first = (px.groupby("symbol").cumcount() == 0).to_numpy()
+    m, pos = m[~first[pos]], pos[~first[pos]]            # 첫 행은 이전 가격이 없어 의미 없음
+    raw = px["raw_close"].to_numpy(dtype=float)[pos]
+    ok = raw > 0
+    k = raw[ok] / (raw[ok] + (1 - tax) * m["dps"].to_numpy(dtype=float)[ok])
+    step = np.ones(len(px))
+    np.multiply.at(step, pos[ok], k)
+    _scale_history(px, pd.Series(step, index=px.index))
+    y = 1 / k - 1
+    return meta | {"events": int(ok.sum()), "skipped_no_price": int((~ok).sum()),
+                   "symbols": int(m.loc[ok, "symbol"].nunique()),
+                   "mean_net_yield": float(y.mean()) if len(y) else 0.0}
 
 
 KR_JUMP = 0.35        # 하루 가격제한(2015-06 이후 ±30%, 이전 ±15%)을 넘는 변동
@@ -399,6 +471,11 @@ def _us(symbols, start, end, fields, currency=None, dividend_tax=None):
     else:
         ratio = (px["adj_close"] / px["close"]).where(px["close"] > 0)
     px["raw_close"] = px["close"]
+    # 배당 필드용: 그날 배당액(close 기준 = 분할 반영) = adj 수익과 close 수익의 차 × 전일 close. 통화 환산 전 USD.
+    g = px["symbol"]
+    c0, a0 = px["close"].where(px["close"] > 0), px["adj_close"]
+    px["_div_amt"] = (a0 / a0.groupby(g).shift() * c0.groupby(g).shift() - c0).clip(lower=0)
+    px["_rc"] = c0
     for c in ("open", "close", "high", "low"):
         px[c] = px[c] * ratio
     meta = {"source": "us_1d (adj_close로 배당 재투자 수정)", "rows": len(px), "bad_adj_steps": bad_adj,
@@ -413,6 +490,133 @@ def _us(symbols, start, end, fields, currency=None, dividend_tax=None):
     elif currency not in (None, "USD"):
         raise ValueError(f"지원하지 않는 통화: {currency}")
     return px, meta
+
+
+# ── 배당: 신호용 필드 (dps, div_yield) ──
+DIV_FIELDS = ("dps", "div_yield")
+DIV_STALE_DAYS = 550          # KR: 마지막 사업보고서 값이 이보다 오래되면 낡은 값으로 보고 비운다 (코드 재사용 등)
+US_DIV_START = pd.Timestamp("2016-01-01")   # us_dividends 시작 → 그 뒤 1년이 지나야 12개월 합계가 온전하다
+US_DIV_PLACE_DAYS = 5         # US 배당락일에 봉이 없으면 이 안의 다음 봉에 붙인다
+DIV_TIMING = {
+    "kr_stock": "dps = 최신 사업보고서 주당 현금배당(dart_dividend dps_common, 원, 연간 합계), "
+                "최초 접수일(first_filed) 다음 날부터. 그날 주식 기준으로 분할 환산. div_yield = dps / raw_close",
+    "us_stock": "dps = 직전 365일 정기 현금배당 합계(us_dividends 배당락일, 특별배당 제외), 배당락일 당일부터. "
+                "금액은 us_1d close 기준(분할 반영, USD). div_yield = dps / 그날 close(USD)",
+}
+
+
+def dividends(market: str, symbols=None, asof=None) -> pd.DataFrame:
+    """전략·검사용 배당 이벤트 표. 열: symbol, src_date(원천에 나타난 날), known(이 날짜 봉부터 쓸 수 있음), dps.
+    kr_stock: dart_dividend 사업보고서 연간 dps_common(원본 주당 원). src_date = 최초 접수일(first_filed()).
+              filed 열은 정정일일 수 있어 시점으로 쓰지 않는다. 최초 접수일이 없는 행만 filed로 대신한다
+              (더 늦은 날이라 보수적, filed_fallback=True). known = src_date 다음 날. year, ref(결산일)도 준다.
+    us_stock: us_dividends 정기 현금배당(특별배당·주식배당 제외). src_date = known = 배당락일. dps = Alpaca rate
+              (원본 금액, 분할 미반영). us_dividend_announcements의 발표일은 실제 결의일이 아니라 쓰지 않는다.
+    asof: 그날까지 원천에 있던 행만 (KR 최초 접수일 < asof, US 배당락일 ≤ asof)."""
+    cols = ["symbol", "src_date", "known", "dps"]
+    if market == "kr_stock":
+        dv = store.read("dart_dividend", "ALL")
+        if dv.empty:
+            return pd.DataFrame(columns=cols)
+        dv = dv[dv["has_data"].astype(bool)]
+        if "reprt_code" in dv:
+            dv = dv[dv["reprt_code"] == "11011"]
+        if symbols not in (None, "ALL", "KOSPI", "KOSDAQ"):
+            dv = dv[dv["symbol"].isin([symbols] if isinstance(symbols, str) else symbols)]
+        dv = dv.assign(period=dv["ts"].dt.tz_convert(TZ["kr_stock"]).dt.strftime("%Y.%m"))
+        from ..data.collectors.dividends import first_filed
+        try:
+            ff = first_filed()
+        except ValueError:            # 공시 목록이 둘 다 비어 있으면 first_filed()의 concat이 실패한다
+            ff = pd.DataFrame()
+        if not ff.empty:
+            ff = ff.loc[ff["kind"] == "사업보고서", ["corp_code", "period", "first_filed"]]
+            dv = dv.merge(ff, on=["corp_code", "period"], how="left")
+        else:
+            dv = dv.assign(first_filed=pd.NaT)
+        fallback = dv["first_filed"].isna()
+        src = _local_date(pd.to_datetime(dv["first_filed"], utc=True).where(~fallback, dv["filed"]), TZ["kr_stock"])
+        out = pd.DataFrame({"symbol": dv["symbol"].str.strip(), "src_date": src, "known": src + pd.Timedelta(days=1),
+                            "dps": dv["dps_common"].fillna(0.0).astype(float),   # 보고서는 있는데 값 없음 = 무배당
+                            "year": dv["bsns_year"], "ref": _local_date(dv["ts"], TZ["kr_stock"]),
+                            "filed_fallback": fallback})
+        if asof is not None:
+            out = out[out["src_date"] < pd.Timestamp(asof)]
+    elif market == "us_stock":
+        u = store.read("us_dividends", "ALL")
+        if u.empty:
+            return pd.DataFrame(columns=cols)
+        u = u[(u["kind"] == "cash_dividend") & ~u["special"].astype(bool)]
+        if symbols not in (None, "ALL"):
+            u = u[u["symbol"].isin([symbols] if isinstance(symbols, str) else symbols)]
+        ex = _local_date(u["ts"], TZ["us_stock"])
+        out = pd.DataFrame({"symbol": u["symbol"], "src_date": ex, "known": ex, "dps": u["rate"].astype(float)})
+        if asof is not None:
+            out = out[out["src_date"] <= pd.Timestamp(asof)]
+    else:
+        raise ValueError(f"배당 데이터는 kr_stock·us_stock만 있다: {market}")
+    return out.sort_values(["symbol", "known"]).reset_index(drop=True)
+
+
+def _div_basis(long: pd.DataFrame, market: str) -> pd.DataFrame:
+    cols = ["raw_close", "_f"] if market == "kr_stock" else ["_rc", "_div_amt"]
+    return long[["date", "symbol"] + cols].sort_values(["symbol", "date"]).reset_index(drop=True)
+
+
+def dividend_fields(market: str, basis: pd.DataFrame, asof=None) -> pd.DataFrame:
+    """basis(_div_basis) 날짜·종목마다 그날 알 수 있는 dps, div_yield. 반환: date, symbol, dps, div_yield."""
+    b = basis.sort_values(["symbol", "date"]).reset_index(drop=True)
+    syms = sorted(b["symbol"].unique())
+    ev = dividends(market, syms, asof)
+    if market == "kr_stock":
+        # 늦게 나온 옛 사업연도 보고서는 이미 알려진 최신 연도 값을 덮지 않는다 (cummax는 과거만 본다)
+        ev = ev.sort_values(["symbol", "known", "year"])
+        ev = ev[ev["year"] >= ev.groupby("symbol")["year"].cummax()]
+        ev = ev.drop_duplicates(["symbol", "known"], keep="last").sort_values("known")
+        bd = b.sort_values("date")
+        # 알려진 날(그 뒤 첫 봉)의 수정계수 → 그날 계수로 나눠 그 사이 분할·병합만 반영 (미래 정보 없음)
+        ev = pd.merge_asof(ev, bd[["date", "symbol", "_f"]], left_on="known", right_on="date", by="symbol",
+                           direction="forward").drop(columns="date").rename(columns={"_f": "_fk"})
+        m = pd.merge_asof(bd, ev[["symbol", "known", "dps", "_fk"]], left_on="date", right_on="known", by="symbol",
+                          direction="backward", tolerance=pd.Timedelta(days=DIV_STALE_DAYS))
+        m["dps"] = m["dps"] * m["_fk"] / m["_f"]
+        m["div_yield"] = m["dps"] / m["raw_close"].where(m["raw_close"] > 0)
+    else:
+        ev = ev.drop_duplicates(["symbol", "known"]).sort_values("known")
+        rows = b[["date", "symbol"]].assign(row=np.arange(len(b))).sort_values("date")
+        hit = pd.merge_asof(ev[["symbol", "known"]], rows, left_on="known", right_on="date", by="symbol",
+                            direction="forward", tolerance=pd.Timedelta(days=US_DIV_PLACE_DAYS))["row"].dropna()
+        amt = np.zeros(len(b))
+        pos = np.unique(hit.astype(int).to_numpy())
+        amt[pos] = b["_div_amt"].to_numpy(dtype=float)[pos]
+        m = b.assign(_amt=np.nan_to_num(amt))
+        m["dps"] = m.set_index("date").groupby("symbol", sort=True)["_amt"].rolling("365D").sum().to_numpy()
+        m.loc[m["date"] < US_DIV_START + pd.Timedelta(days=365), "dps"] = np.nan
+        m["div_yield"] = m["dps"] / m["_rc"]
+    return m[["date", "symbol", "dps", "div_yield"]]
+
+
+def check_dividend_causality(panel: Panel, n_cuts: int = 3, tol: float = 1e-9) -> dict:
+    """배당 필드(dps, div_yield) 미래참조 검사: 중간 날짜 cut에서 '그때까지 원천에 있던 배당 기록'과
+    cut까지의 가격만으로 다시 만든 값이, 전체로 만든 panel 값과 cut까지 같아야 한다.
+    (시점 규칙을 어기면 — 예: 최초 접수일 당일이나 결산일부터 보이게 하면 — cut 근처에서 어긋난다.)"""
+    fields = [f for f in DIV_FIELDS if f in panel]
+    out = {"passed": True, "fields": fields, "cuts": []}
+    if not fields or panel.div_basis is None:
+        return out
+    b, idx = panel.div_basis, panel.index
+    for q in np.linspace(0.4, 0.85, n_cuts):
+        cut = idx[int(len(idx) * q)]
+        part = dividend_fields(panel.market, b[b["date"] <= cut], asof=cut)
+        bad = 0
+        for f in fields:
+            p = part.pivot(index="date", columns="symbol", values=f)
+            full = panel[f].reindex(index=p.index, columns=p.columns).to_numpy(dtype=float)
+            same = np.isclose(full, p.to_numpy(dtype=float), rtol=tol, atol=tol, equal_nan=True)
+            bad += int((~same).any(axis=1).sum())
+        out["cuts"].append({"cut": str(cut), "mismatch_bars": bad})
+        out["passed"] &= bad == 0
+    return out
 
 
 def _crypto(market, symbols, start, end, fields, timeframe):
