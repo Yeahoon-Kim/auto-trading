@@ -15,7 +15,9 @@ lab의 strategy.py는 generate_signals(data, params)로 '봉 t 종가 시점에 
   실제 정리매매는 더 낮은 값에 팔리는 경우가 많아 이 가정은 낙관적이다 — krx_1d에 정리매매 시세가 있으면 그만큼은 반영된다.
 비용 (Costs, 모두 %)
 - 매매한 금액 × (수수료 + 슬리피지), 매도한 금액(롱 감소분) × 매도세. 비중이 가격 변동으로 흘러간 것(drift)까지 맞추는 회전율 기준.
-- 반영하지 않는 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격(주문 크기에 따른), 양도소득세·배당세.
+- 선물 펀딩비: panel["funding"]이 있으면 (crypto_futures 기본) 봉 동안 든 포지션에 비중 × 비율로 반영.
+  수익(returns·gross)에 들어가고 Result.funding에 따로 남는다.
+- 반영하지 않는 것: 공매도 대차 비용, 시장 충격(주문 크기에 따른), 양도소득세·배당세.
 """
 
 from __future__ import annotations
@@ -87,6 +89,7 @@ class Result:
     equity: pd.Series | None = None     # capital을 줬을 때: 봉 종가 평가액 (통화 단위)
     invested: pd.Series | None = None   # 누적 투입액 (초기 자본 + 적립금)
     shares: pd.DataFrame | None = None  # whole_shares일 때 보유 주식 수
+    funding: pd.Series | None = None    # 선물: 봉별 펀딩 손익 (자산 대비, +면 받음). returns·gross에 포함
 
     def money(self) -> dict:
         """금액 기준 결과 (capital을 줬을 때). 적립식이면 수익률은 투입 대비, xirr은 돈 들어온 시점을 반영한 연수익률.
@@ -114,6 +117,9 @@ class Result:
               "cost_per_year": float(self.cost.mean() * year),
               "exposure": float(self.weights.abs().sum(axis=1).mean()),
               "gross_total_return": float((1 + self.gross).prod() - 1)}
+        if self.funding is not None:
+            m["funding_per_year"] = float(self.funding.mean() * year)          # +면 받은 펀딩
+            m["funding_total"] = float((1 + self.funding).prod() - 1)
         return m
 
 
@@ -204,6 +210,9 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
           if "tradable" in panel else np.ones_like(c, dtype=bool))
     W = w.to_numpy()
     n, k = c.shape
+    # 선물 펀딩비: 봉 t 안에 정산된 비율 합. 그 봉 동안 든 포지션이 비중 × 비율만큼 낸다 (숏은 받음)
+    has_f = "funding" in panel
+    F = panel["funding"].reindex(columns=w.columns).fillna(0.0).to_numpy(float) if has_f else None
 
     # 종목별 마지막 유효 종가 위치 → 그 다음 봉에서 강제 청산
     valid = ~np.isnan(c)
@@ -224,7 +233,7 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
     V = float(capital or 0.0) if money else 1.0
     inv = V if money else 0.0
     h = np.zeros(k)                 # 현재 보유 비중 (직전 봉 종가 기준, drift 반영)
-    net, gross, cost_s, turn_s, eq_s, inv_s = (np.zeros(hi - lo) for _ in range(6))
+    net, gross, cost_s, turn_s, eq_s, inv_s, fund_s = (np.zeros(hi - lo) for _ in range(7))
     held = np.zeros((hi - lo, k))
     sh_s = np.zeros((hi - lo, k)) if whole_shares else None
     sh = np.zeros(k)                # whole_shares: 보유 주식 수
@@ -234,6 +243,11 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
     def drift(h, r):
         p = float(h @ r)
         return (h * (1 + r) / (1 + p) if abs(1 + p) > EPS else h * 0), p
+
+    def pay_funding(h, rate):
+        """펀딩은 현금으로 오가고 포지션 금액은 그대로 → 자산이 (1 + pf)배, 비중은 그만큼 반대로."""
+        pf = -float(h @ rate)
+        return (h / (1 + pf) if abs(1 + pf) > EPS else h * 0), pf
 
     for t in range(max(lo, 1), hi):
         prev_c = np.where(np.isnan(c[t - 1]), last_px, c[t - 1])
@@ -258,6 +272,9 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         px = np.where(np.isnan(px), last_px, px)            # 상장폐지 청산 가격
         h, p1 = drift(h, g)
         V *= 1 + p1
+        pf = 0.0
+        if has_f and fill == "next_close":      # 체결이 봉 끝이라 이 봉 동안은 이전 포지션
+            h, pf = pay_funding(h, F[t])
 
         # 적립금: 현금으로 들어온 뒤 비중이 그만큼 희석된다
         f = flow[t]
@@ -312,12 +329,15 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         # 소수점(비중) 모드: 비용만큼 산 금액이 줄어든다고 본다 (비중 1 = 비용 떼고 전액 투자).
         h = (new / (1 - cost) if cost < 1 else new * 0) if whole_shares else new
         V *= 1 - cost
+        if has_f and fill == "next_open":       # 봉 시가에 맞춘 포지션이 이 봉의 정산을 맞는다
+            h, pf = pay_funding(h, F[t])
+        V *= 1 + pf
         h, p2 = drift(h, seg2)     # next_close면 seg2 = 0 (종가에 맞추고 봉이 끝남)
         V *= 1 + p2
         i = t - lo
-        gross[i] = (1 + p1) * (1 + p2) - 1
-        net[i] = (1 + p1) * (1 - cost) * (1 + p2) - 1   # 적립금이 들어온 뒤 구간까지 이어 붙인 시간가중
-        cost_s[i], turn_s[i] = cost, turnover
+        gross[i] = (1 + p1) * (1 + pf) * (1 + p2) - 1
+        net[i] = (1 + p1) * (1 - cost) * (1 + pf) * (1 + p2) - 1   # 적립금이 들어온 뒤 구간까지 이어 붙인 시간가중
+        cost_s[i], turn_s[i], fund_s[i] = cost, turnover, pf
         held[i] = h
         eq_s[i], inv_s[i] = V, inv
         if whole_shares:
@@ -331,6 +351,8 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         weights=pd.DataFrame(held, sl, w.columns).iloc[first:],
         trades=trades, forced_exits=forced, costs=costs,
         meta={"fill": fill, "rebalance": rebalance, "whole_shares": whole_shares})
+    if has_f:
+        res.funding = pd.Series(fund_s, sl).iloc[first:]
     if money:
         res.equity = pd.Series(eq_s, sl).iloc[first:]
         res.invested = pd.Series(inv_s, sl).iloc[first:]

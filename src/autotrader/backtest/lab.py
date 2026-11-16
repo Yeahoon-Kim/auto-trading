@@ -102,7 +102,8 @@ def _panel(cfg: dict, lockbox: bool) -> Panel:
     return load(cfg["market"], cfg.get("universe") or None, start=cfg.get("data_start") or None,
                 timeframe=cfg.get("timeframe", "1d"), fields=tuple(fields),
                 lockbox=lockbox, currency=cfg.get("currency") or None,
-                dividend_tax=cfg.get("dividend_tax"), fin_timing=cfg.get("fin_timing") or "first")
+                dividend_tax=cfg.get("dividend_tax"), fin_timing=cfg.get("fin_timing") or "first",
+                funding=cfg.get("funding", True) is not False)
 
 
 def _kind(cfg: dict) -> str:
@@ -372,6 +373,7 @@ def report(s: dict) -> str:
         elif cov.get("rows"):
             lines.append(f"- 실행 시점 배당 데이터 범위: {cov['rows']:,}건, 배당락 {cov['first']}~{cov['last']}")
     lines += _fin_lines(s["data"])
+    lines += _funding_lines(s["data"])
     if "causality" in s:
         c = s["causality"]
         df = c.get("dividend_fields") or {}
@@ -387,6 +389,8 @@ def report(s: dict) -> str:
               f"- 총수익 {_fmt(t.get('total_return'))}, CAGR {_fmt(t.get('cagr'))}, Sharpe {_fmt(t.get('sharpe'))} "
               f"(rf=0: {_fmt(t.get('sharpe_rf0'))}), MDD {_fmt(t.get('mdd'))}, 거래 {t.get('trades')}회, "
               f"연 회전율 {_fmt(t.get('turnover_per_year'))}, 연 비용 {_fmt(t.get('cost_per_year'))}"]
+    if "funding_per_year" in t:
+        lines.append(f"- 펀딩비 (수익에 포함, +면 받음): 연 {_fmt(t['funding_per_year'])}, 기간 누적 {_fmt(t.get('funding_total'))}")
     if s.get("money"):
         mo, e = s["money"], s.get("execution") or {}
         cur = s["data"].get("currency") or (s.get("account") or {}).get("currency") or ""
@@ -434,8 +438,22 @@ def report(s: dict) -> str:
         lines += ["", "## 국면별 (참고, 전날 추세 라벨)"]
         lines += [f"- {k}: {v['bars']}봉, Sharpe {v['sharpe']:.2f}, 수익 {v['total_return']:.2%}"
                   for k, v in s["regimes"].items()]
-    lines += ["", "반영 안 한 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격, 양도소득세, 현금 이자."]
+    no_f = "" if s["data"].get("funding") else "선물 펀딩비, "
+    lines += ["", f"반영 안 한 것: 공매도 대차 비용, {no_f}시장 충격, 양도소득세, 현금 이자."]
     return "\n".join(lines) + "\n"
+
+
+def _funding_lines(d: dict) -> list[str]:
+    """선물: 펀딩비 반영 여부와 실행 시점 원천 범위."""
+    if d.get("note") == "선물 펀딩비 미반영":
+        return ["- 선물 펀딩비 반영: **아니오** (lab.yaml funding: false)"]
+    f = d.get("funding")
+    if not f:
+        return []
+    miss = f.get("symbols_without_funding") or []
+    return [f"- 선물 펀딩비 반영: 예 ({f.get('source', 'binance_um_funding')}, 봉 동안 든 포지션 × 비율, 롱은 양수에 냄·숏은 받음, "
+            f"정산 {f.get('events', 0):,}건, 범위 {f.get('range', '없음')}"
+            + (f", **펀딩 데이터 없는 종목 {len(miss)}개: {', '.join(miss[:10])}** (0으로 처리)" if miss else "") + ")"]
 
 
 def _fin_lines(d: dict) -> list[str]:

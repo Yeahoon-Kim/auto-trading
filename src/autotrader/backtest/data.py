@@ -16,7 +16,7 @@
               손익 FIN_TTM(net_income_ttm …)은 최근 4개 분기 3개월 값 합. 공개일 다음 거래일부터 보인다 (fin_reports()).
               check_fin_causality()가 cut 전에 공개된 보고서만으로 다시 만든 값과 비교한다.
 - crypto_spot / crypto_futures : binance_spot_1m / binance_um_1m을 timeframe(1d, 1h …)으로 묶음. UTC 기준.
-              선물 펀딩비는 엔진에 반영하지 않는다 (필요하면 binance_um_funding을 lab에서 직접 읽어 신호·비용에 넣는다).
+              선물은 panel["funding"](봉 안에 정산된 펀딩비율 합, binance_um_funding)을 같이 주고 엔진이 손익에 반영한다.
 
 잠금 구간: 실행일 기준 최근 6개월. lockbox=False(기본)면 그 이전까지만 읽는다.
 """
@@ -96,7 +96,7 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
          timeframe: str = "1d", fields: tuple[str, ...] = ("open", "close"),
          lockbox: bool = False, today=None, currency: str | None = None,
          dividend_tax: float | None = None, neutralize_jumps: bool = True,
-         reinvest_dividends: bool = True, fin_timing: str = "first") -> Panel:
+         reinvest_dividends: bool = True, fin_timing: str = "first", funding: bool = True) -> Panel:
     """symbols: None/"ALL" = 전체. kr_stock은 "KOSPI"/"KOSDAQ"도 받는다 (그날 소속 시장 기준).
     lockbox=False면 end를 dev_end()로 자른다.
     dividend_tax: 배당 재투자 때 떼는 비율 (0이면 전액 재투자).
@@ -109,7 +109,11 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
       neutralize_jumps 가격제한을 넘는 하루 변동을 0으로 (수정계수에 빠진 감자·병합 등). 정리매매 구간은 제외.
       항상 하는 처리: config/kr_exclude.yaml 종목 제외, 코드 재사용 분리, 주식수 기반 병합·감자 보정.
       panel["tradable"] (거래량 > 0)을 같이 준다 → 엔진이 거래정지일에는 매매하지 않는다.
-      fin_timing  재무 필드(FIN_FIELDS)의 공개일: "first"(최초 접수일, 배당과 같은 규칙) | "last"(마지막 접수일 = filed)."""
+      fin_timing  재무 필드(FIN_FIELDS)의 공개일: "first"(최초 접수일, 배당과 같은 규칙) | "last"(마지막 접수일 = filed).
+    crypto_futures 전용:
+      funding  True(기본)면 panel["funding"] = 그 봉 [시작, 끝) 안에 정산된 펀딩비율 합 (binance_um_funding).
+               엔진이 그 봉 동안 든 포지션에 비중 × 비율만큼 물린다 (롱은 양수 비율에 냄, 숏은 받음).
+               봉 끝에 이미 알려진 값이라 신호로 써도 된다. False면 예전처럼 미반영."""
     cut = dev_end(today)
     if not lockbox:
         end = min(pd.Timestamp(end), cut) if end is not None else cut
@@ -128,7 +132,9 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
         if currency == "KRW":
             fields = tuple(dict.fromkeys(fields + ("close_usd", "fx")))
     elif market in ("crypto_spot", "crypto_futures"):
-        long, meta = _crypto(market, symbols, start, end, fields, timeframe)
+        long, meta = _crypto(market, symbols, start, end, fields, timeframe, funding)
+        if market == "crypto_futures" and funding:
+            fields = fields + ("funding",)
     else:
         raise ValueError(f"지원하지 않는 시장: {market}")
     if long.empty:
@@ -863,7 +869,31 @@ def check_fin_causality(panel: Panel, n_cuts: int = 3, tol: float = 1e-9) -> dic
     return out
 
 
-def _crypto(market, symbols, start, end, fields, timeframe):
+def _funding(px: pd.DataFrame, symbols, start, end, n: int, unit: str) -> tuple[pd.DataFrame, dict]:
+    """binance_um_funding → (bucket, symbol, funding). 가격 봉과 같은 time_bucket으로 묶는다.
+    정산 시각은 밀리초 단위로 흔들려(08:00:00.001) 분 단위로 내린 뒤 묶는다 → 08:00 정산은 08:00에 시작하는 봉."""
+    src = _files("binance_um_funding", symbols, start, end)
+    syms = set(px["symbol"])
+    if not src:
+        return pd.DataFrame(columns=["bucket", "symbol", "funding"]), {"symbols_without_funding": sorted(syms)}
+    sym = "regexp_extract(filename, '[\\\\/]([^\\\\/]+)[\\\\/][^\\\\/]+$', 1)"
+    t = "date_trunc('minute', CAST(ts AS TIMESTAMPTZ))"
+    f = store.query(
+        f"SELECT time_bucket(INTERVAL {n} {unit}, {t}) AS bucket, {sym} AS symbol, sum(funding_rate) AS funding, "
+        f"count(*) AS n_events, min({t}) AS first_ts, max({t}) AS last_ts "
+        f"FROM read_parquet({src}, filename=true) WHERE {_bounds(start, end, 'UTC')} GROUP BY 1, 2")
+    f = f[f["symbol"].isin(syms)]
+    for col in ("bucket", "first_ts", "last_ts"):
+        if len(f) and f[col].dt.tz is None:
+            f[col] = f[col].dt.tz_localize("UTC")
+    meta = {"source": "binance_um_funding (봉 안 정산 합)", "events": int(f["n_events"].sum()),
+            "symbols_without_funding": sorted(syms - set(f["symbol"]))}
+    if len(f):
+        meta["range"] = f"{f['first_ts'].min():%Y-%m-%d %H:%M}~{f['last_ts'].max():%Y-%m-%d %H:%M} UTC"
+    return f[["bucket", "symbol", "funding"]], meta
+
+
+def _crypto(market, symbols, start, end, fields, timeframe, funding: bool = True):
     ds = "binance_spot_1m" if market == "crypto_spot" else "binance_um_1m"
     unit = {"m": "minutes", "h": "hours", "d": "days"}[timeframe[-1]]
     n = int(timeframe[:-1] or 1)
@@ -887,6 +917,13 @@ def _crypto(market, symbols, start, end, fields, timeframe):
     sym_last = px.groupby("symbol")["last_ts"].transform("max")
     partial = px["bucket"] + step > sym_last + pd.Timedelta(minutes=1)
     px = px[~partial]
+    meta = {"source": f"{ds} → {timeframe}", "rows": len(px), "partial_bars_dropped": int(partial.sum()), "note": ""}
+    if market == "crypto_futures":
+        if funding:
+            f, meta["funding"] = _funding(px, symbols, start, end, n, unit)
+            px = px.merge(f, on=["bucket", "symbol"], how="left")
+            px["funding"] = px["funding"].fillna(0.0)       # 정산이 없는 봉은 0
+        else:
+            meta["note"] = "선물 펀딩비 미반영"
     px["date"] = px["bucket"].dt.tz_convert("UTC").dt.tz_localize(None)
-    return px, {"source": f"{ds} → {timeframe}", "rows": len(px), "partial_bars_dropped": int(partial.sum()),
-                "note": "선물 펀딩비 미반영" if market == "crypto_futures" else ""}
+    return px, meta

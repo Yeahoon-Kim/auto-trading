@@ -41,7 +41,9 @@ lab의 strategy.py는 generate_trades(data, params)로 '봉 t 종가까지 보�
 - 계좌 통화가 원화가 아니면 lab.yaml paper.krw_per_unit (고정 환율)으로 주문 상한을 환산한다.
 
 비용: 체결 금액 × (수수료 + 슬리피지), 롱 청산(매도) 금액 × 매도세 — 공용 엔진과 같은 Costs.
-반영하지 않는 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격, 손절 주문의 추가 슬리피지(갭은 시가 체결로 반영).
+선물 펀딩비: panel["funding"]이 있으면 봉 처리(손절·체결) 뒤 남은 포지션에 종가 금액 × 비율을 현금으로 물린다
+(paper 데스크 execution/trade_desk.py에는 아직 없음).
+반영하지 않는 것: 공매도 대차 비용, 시장 충격, 손절 주문의 추가 슬리피지(갭은 시가 체결로 반영).
 """
 
 from __future__ import annotations
@@ -156,6 +158,8 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
     O, H, L, C = (panel[f].reindex(columns=syms).to_numpy(float) for f in ("open", "high", "low", "close"))
     col = {s: j for j, s in enumerate(syms)}
     Cf = pd.DataFrame(C).ffill().to_numpy(float)          # 평가용 종가 (빈 봉은 직전 값)
+    FR = (panel["funding"].reindex(columns=syms).fillna(0.0).to_numpy(float)   # 선물 펀딩비 (봉 안 정산 합)
+          if "funding" in panel else None)
     TR = (panel["tradable"].reindex(columns=syms).fillna(False).to_numpy(bool)
           if "tradable" in panel else np.ones_like(C, dtype=bool))
     valid = ~np.isnan(C)
@@ -174,7 +178,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
     book = desk.TradeBook(cash=account.capital)
     m = account.multiplier
     out_n = hi - lo
-    net, gross, cost_s, turn_s, eq_s = (np.zeros(out_n) for _ in range(5))
+    net, gross, cost_s, turn_s, eq_s, fund_s = (np.zeros(out_n) for _ in range(6))
     held = np.zeros((out_n, len(syms)))
     trades_n = forced = 0
 
@@ -200,6 +204,11 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
             traded, tcost = traded + a, tcost + c
             a, c, k = desk.fill(book, spec, quote, idx[t], bar_open, bar_end, day_close, fee, tax_t[t], rcfg)
             traded, tcost, trades_n = traded + a, tcost + c, trades_n + k
+            if FR is not None:   # 봉 처리 뒤 남은 포지션이 이 봉 정산을 낸다 (롱은 양수 비율에 냄). 현금으로 오간다
+                pay = sum(desk.sgn(p["side"]) * p["qty"] * m * Cf[t, col[s]] * FR[t, col[s]]
+                          for s, p in book.positions.items())
+                book.cash -= pay
+                fund_s[t - lo] = -pay
         V = V_at(t)
         desk.plan(book, spec, by_bar.get(t, []), V, lambda s, t=t: Cf[t, col[s]], idx[t],
                   bar_end.to_pydatetime(), rcfg)
@@ -208,6 +217,7 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
             base = prev_v if abs(prev_v) > 1e-12 else 1.0
             net[i] = V / base - 1
             cost_s[i], turn_s[i] = tcost / base, traded / base
+            fund_s[i] /= base
             gross[i] = (V + tcost) / base - 1
             eq_s[i] = V
             for s, p in book.positions.items():
@@ -227,6 +237,8 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
         meta={"type": "trade", "trade_log": tl, "blocked": book.blocked})
     res.equity = pd.Series(eq_s, sl).iloc[first:]
     res.invested = pd.Series(account.capital, sl).iloc[first:]
+    if FR is not None:
+        res.funding = pd.Series(fund_s, sl).iloc[first:]
     return res
 
 

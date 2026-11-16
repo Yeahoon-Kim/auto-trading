@@ -50,6 +50,9 @@ fin_timing: first        # 재무 공개일: first = 최초 접수일 (배당과
                          #             last  = 마지막 접수일 filed (보수적, 정정된 보고서는 정정일까지 안 보임)
                          #   dart_fin은 정정 전 원래 값을 저장하지 않는다. 결과가 둘 사이에서 크게 다르면 validator에 알린다
 fill: next_open          # next_open (다음 봉 시가 체결) | next_close (다음 봉 종가)
+funding: true            # crypto_futures: 펀딩비 반영 (binance_um_funding). 봉 동안 든 포지션 × 그 봉에 정산된 비율 합,
+                         #   롱은 양수 비율에 내고 숏은 받는다. data.funding으로 신호에도 쓸 수 있다 (봉 끝에 알려진 값)
+                         #   false면 미반영 (비교용, report에 표시)
 currency: ""             # us_stock: KRW면 그날 원/달러(ECOS)로 환산해 환율 변동까지 수익에 넣음
 dividend_tax:            # 배당 재투자 때 떼는 비율 (0이면 전액). 비우면 us_stock 원천징수 15%, kr_stock 배당소득세 15.4%
                          #   kr_stock 가격은 배당락일에 세후 배당을 재투자한 총수익 (kr_dividend_schedule)
