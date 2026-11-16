@@ -9,7 +9,9 @@
 - 잠금 구간까지 포함한 최신 데이터를 읽는다 (paper는 앞으로 가는 검증이라 판정용 잠금과 상관없다).
 - 마지막 처리 봉 이후의 봉을 차례로 처리한다 (며칠 못 돌았으면 따라잡기). 첫 실행은 마지막 봉 하나만.
 - 기록: results/paper/<lab폴더>/book.json(장부), events.jsonl(주문·체결·리스크), equity.csv
-- 지원 시장: kr_stock, crypto_spot. 롱만. us_stock은 원본가 처리(배당 포함 수정주가) 확인 후 추가.
+- 지원 시장: kr_stock, crypto_spot. 비중형은 롱만. us_stock은 원본가 처리(배당 포함 수정주가) 확인 후 추가.
+- 신호형(type: trade): generate_trades() → execution/paper_trade.py (봉 처리 규칙은 백테스트와 같은 execution/trade_desk.py).
+  --replay-days는 같은 구간을 백테스트 재생(backtest/trade.py run)과 비교한다.
 """
 
 from __future__ import annotations
@@ -25,9 +27,12 @@ import pandas as pd
 import yaml
 
 from autotrader.backtest import engine
+from autotrader.backtest import trade as bt_trade
 from autotrader.backtest.data import load
 from autotrader.backtest.lab import load_strategy
 from autotrader.data import store
+from autotrader.execution import paper_trade
+from autotrader.execution import trade_desk as desk
 from autotrader.execution.paper import Book, bars, step
 from autotrader.risk.guards import load_config
 
@@ -49,8 +54,8 @@ def lab_config(lab_dir: Path) -> dict:
 def options(cfg: dict) -> dict:
     """lab.yaml의 paper 블록(선택)과 시장 기본값을 합친다."""
     m, kind = cfg["market"], cfg.get("type") or "portfolio"
-    if kind != "portfolio":
-        raise SystemExit(f"type: {kind} — paper 데스크는 아직 비중형(portfolio)만 돈다. 신호형(trade) 경로는 2단계")
+    if kind not in ("portfolio", "trade"):
+        raise SystemExit(f"type: {kind} — portfolio(비중형) 또는 trade(신호형)만 있다")
     if m not in MARKETS:
         raise SystemExit(f"paper 데스크가 아직 지원하지 않는 시장: {m} (지원: {', '.join(MARKETS)})")
     p = {**MARKETS[m], "limit_band_pct": 5.0, "krw_per_unit": 1.0 if m == "kr_stock" else None,
@@ -67,6 +72,8 @@ def load_panel(cfg: dict, today=None):
     fields = list(cfg.get("fields") or [])
     if cfg["market"] == "kr_stock" and "raw_close" not in fields:
         fields.append("raw_close")      # 원본가 장부용
+    if (cfg.get("type") or "portfolio") == "trade":
+        fields += [f for f in ("high", "low") if f not in fields]   # 손절·목표가 판정
     panel = load(cfg["market"], cfg.get("universe") or None, start=cfg.get("data_start") or None,
                  timeframe=cfg.get("timeframe", "1d"), fields=tuple(fields), lockbox=True, today=today)
     if cfg["market"].startswith("crypto"):     # 오늘(UTC) 봉은 아직 안 끝났다 → 버린다
@@ -171,7 +178,8 @@ def run_today(lab_dir: Path, *, allow_unvalidated=False, dry_run=False, notify=T
 
     out = paper_dir(lab_dir)
     path = out / "book.json"
-    book = Book.from_dict(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else None
+    kind = desk.TradeBook if is_trade(cfg) else Book
+    book = kind.from_dict(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else None
     if book is None:
         start_i = len(panel.index) - 1
     else:
@@ -179,17 +187,22 @@ def run_today(lab_dir: Path, *, allow_unvalidated=False, dry_run=False, notify=T
         if start_i >= len(panel.index):
             print(f"{lab}: 새 봉 없음 (마지막 처리 {book.last_bar})")
             return book, []
-    W = signals(lab_dir, cfg, panel)
     costs = engine.Costs.from_config(cfg["market"], cfg.get("costs"))
-    rebalance = (cfg.get("execution") or {}).get("rebalance") or "always"
-    kw = {k: opt[k] for k in ("lot", "min_notional", "krw_per_unit", "limit_band_pct", "retirement")}
-    book, ev = replay(panel, W, start_i, opt["capital"], costs, load_config(), lab=lab, market=cfg["market"],
-                      rebalance=rebalance, book=book, enter_now=enter_now, **kw)
+    if is_trade(cfg):
+        by_bar, _ = trade_signals(lab_dir, cfg, panel)
+        book, ev = replay_trade(panel, by_bar, start_i, costs, load_config(), trade_spec(cfg, opt, lab),
+                                capital=opt["capital"], book=book, retirement=opt["retirement"])
+    else:
+        W = signals(lab_dir, cfg, panel)
+        rebalance = (cfg.get("execution") or {}).get("rebalance") or "always"
+        kw = {k: opt[k] for k in ("lot", "min_notional", "krw_per_unit", "limit_band_pct", "retirement")}
+        book, ev = replay(panel, W, start_i, opt["capital"], costs, load_config(), lab=lab, market=cfg["market"],
+                          rebalance=rebalance, book=book, enter_now=enter_now, **kw)
     n = len(panel.index) - start_i
     if n > 1:
         ev.insert(0, {"kind": "catch_up", "bars": n, "bar": str(panel.index[start_i].date()),
                       "reason": f"{n}봉 따라잡기"})
-    text = summarize(lab, ev, book)
+    text = summarize_trade(lab, ev, book) if is_trade(cfg) else summarize(lab, ev, book)
     print(text)
     if not dry_run:
         _save(out, book, ev)
@@ -229,6 +242,94 @@ def _no_limits(risk: dict) -> dict:
     return r
 
 
+# ── 신호형 (type: trade) ──
+def is_trade(cfg: dict) -> bool:
+    return (cfg.get("type") or "portfolio") == "trade"
+
+
+def trade_spec(cfg: dict, opt: dict, lab: str) -> desk.DeskSpec:
+    """백테스트 재생과 같은 계좌·사이징 설정 (lab.yaml trade·paper 블록)."""
+    return desk.DeskSpec(lab=lab, market=cfg["market"], currency="KRW" if cfg["market"] == "kr_stock" else "USDT",
+                         krw_per_unit=opt["krw_per_unit"], lot=opt["lot"], min_notional=opt["min_notional"],
+                         trade_cfg=cfg.get("trade") or None)
+
+
+def trade_signals(lab_dir: Path, cfg: dict, panel) -> tuple[dict[int, list], pd.DataFrame]:
+    """generate_trades → 표준 신호표 → 봉 위치별 행."""
+    sig = bt_trade.normalize(load_strategy(lab_dir).generate_trades(panel, cfg.get("params") or {}), panel)
+    by_bar: dict[int, list] = {}
+    if len(sig):
+        for i, r in zip(panel.index.searchsorted(pd.DatetimeIndex(sig["ts"])), sig.itertuples(index=False)):
+            by_bar.setdefault(int(i), []).append(r)
+    return by_bar, sig
+
+
+def replay_trade(panel, by_bar: dict, start_i: int, costs, risk: dict, spec: desk.DeskSpec, *, capital: float,
+                 end_i: int | None = None, book: desk.TradeBook | None = None,
+                 retirement: dict | None = None) -> tuple[desk.TradeBook, list[dict]]:
+    """봉 start_i..end_i를 신호형 paper 데스크로 처리한다. book이 없으면 새 계좌."""
+    book = book or desk.TradeBook(cash=float(capital))
+    raw = paper_trade.trade_bars(panel)
+    tax = costs.tax_rates(panel.index)
+    ev: list[dict] = []
+    for i in range(start_i, (end_i if end_i is not None else len(panel.index) - 1) + 1):
+        ev += paper_trade.step(book, panel, raw, by_bar.get(i, []), i, costs.per_trade, float(tax[i]), risk, spec,
+                               retirement=retirement)
+    return book, ev
+
+
+def summarize_trade(lab: str, ev: list[dict], book: desk.TradeBook) -> str:
+    k = pd.Series([e["kind"] for e in ev]).value_counts().to_dict() if ev else {}
+    exits = [e for e in ev if e["kind"] == "fill" and e.get("exit_kind")]
+    lines = [f"📒 paper {lab} (신호형) — {book.last_bar}",
+             f"자산 {book.equity:,.0f} · 현금 {book.cash:,.0f} · 보유 {len(book.positions)}종목 · 대기 주문 {len(book.pending)}",
+             (f"진입 {k.get('fill', 0) - len(exits)} · 청산 {len(exits)} · 새 주문 {k.get('order', 0)} · "
+              f"진입 못 함 {k.get('risk_block', 0)}")]
+    for e in exits[:8]:
+        lines.append(f"↩ {e['symbol']} {e['exit_kind']} @ {e['price']:,.2f} (R {e['r']:+.2f})")
+    for e in ev:
+        if e["kind"] == "retirement":
+            lines.append(f"⛔ 퇴출 조건: {e['reason']}")
+    alerts = [e for e in ev if e["kind"] == "corporate_action" or e.get("exit_kind") == "unmeasurable"]
+    for e in alerts[:8]:
+        lines.append(f"⚠️ {e['kind']} {e.get('symbol', '')}: {e.get('reason', '')}")
+    return "\n".join(lines)
+
+
+def run_replay_trade(lab_dir: Path, days: int, today=None) -> dict:
+    """최근 days봉을 새 계좌로 paper 데스크 재생하고, 같은 구간 백테스트 재생과 비교한다 (저장 안 함).
+    차이가 나면 원인은 입력이다: 원본가(kr_stock)·kill_switch·상장폐지 처리 (execution/paper_trade.py 참고)."""
+    cfg = lab_config(lab_dir)
+    lab = str(cfg.get("id") or lab_dir.name)
+    opt = options(cfg)
+    panel = load_panel(cfg, today)
+    by_bar, sig = trade_signals(lab_dir, cfg, panel)
+    costs = engine.Costs.from_config(cfg["market"], cfg.get("costs"))
+    spec = trade_spec(cfg, opt, lab)
+    start_i = max(1, len(panel.index) - days)
+    risk = load_config()
+    # 백테스트는 start 직전 봉의 신호로 start 봉에 체결한다 → paper도 그 봉(주문만 냄)부터
+    book, ev = replay_trade(panel, by_bar, start_i - 1, costs, risk, spec, capital=opt["capital"],
+                            retirement=opt["retirement"])
+    acct = bt_trade.Account(capital=float(opt["capital"]), currency=spec.currency, krw_per_unit=spec.krw_per_unit,
+                            lot=spec.lot, min_notional=spec.min_notional)
+    res = bt_trade.run(panel, sig, costs, acct, start=panel.index[start_i], trade_cfg=spec.trade_cfg,
+                       risk_cfg=risk, lab=lab)
+    d = _equity(ev).reindex(res.equity.index).dropna()
+    gap = d / res.equity.reindex(d.index) - 1
+    exits = [e for e in ev if e["kind"] == "fill" and e.get("exit_kind")]
+    tl = res.meta["trade_log"]
+    return {"bars": len(d), "paper_final": book.equity, "backtest_final": float(res.equity.iloc[-1]),
+            "final_gap_pct": float(gap.iloc[-1] * 100) if len(gap) else None,
+            "max_abs_gap_pct": float(gap.abs().max() * 100) if len(gap) else None,
+            "paper_entries": sum(1 for e in ev if e["kind"] == "fill" and not e.get("exit_kind")),
+            "backtest_entries": res.trades,
+            "paper_exits": pd.Series([e["exit_kind"] for e in exits]).value_counts().to_dict() if exits else {},
+            "backtest_exits": tl[tl["exit_kind"] != "open"]["exit_kind"].value_counts().to_dict() if len(tl) else {},
+            "paper_blocked": dict(book.blocked), "backtest_blocked": dict(res.meta["blocked"]),
+            "kill_switch": bool(risk["global"].get("kill_switch"))}
+
+
 def main(argv=None) -> None:
     sys.stdout.reconfigure(encoding="utf-8")       # 윈도 콘솔(cp949)에서 이모지·한글 출력
     ap = argparse.ArgumentParser(description="paper 운용 실행기")
@@ -241,7 +342,8 @@ def main(argv=None) -> None:
     a = ap.parse_args(argv)
     lab_dir = a.lab_dir.resolve()
     if a.replay_days:
-        print(json.dumps(run_replay(lab_dir, a.replay_days), ensure_ascii=False, indent=1, default=str))
+        fn = run_replay_trade if is_trade(lab_config(lab_dir)) else run_replay
+        print(json.dumps(fn(lab_dir, a.replay_days), ensure_ascii=False, indent=1, default=str))
         return
     run_today(lab_dir, allow_unvalidated=a.allow_unvalidated, dry_run=a.dry_run, notify=not a.no_notify,
               enter_now=a.enter_now)
