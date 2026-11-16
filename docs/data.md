@@ -56,6 +56,8 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 | `krx_1d` (symbol=ALL) | KOSPI·KOSDAQ **전 종목** 원본 일봉 + 시가총액 + 상장주식수 (그날 상장 종목 전부 → 생존편향 없음) | KRX Open API | 2010~ | 매일 (KRX는 다음 영업일 공개) |
 | `dart_disclosures` (symbol=ALL) | 전체 상장사 공시 목록 (접수번호, 종목, 보고서명, 제출인) | OpenDART | 2024~ (하루 1.5만 호출씩 백필) | 매일 |
 | `dart_fin` (symbol=ALL) | 상장사 **주요계정 재무**: 매출·영업이익·세전이익·순이익·총포괄손익(3개월 값 + `_cum` 누적), 유동·비유동 자산·부채, 자본금·이익잉여금·자본총계. 연결 우선, 없으면 별도. `filed` = 실제 접수일 | OpenDART `fnlttMultiAcnt` | 2015~, 2015년 이후 KRX 상장 종목(상장폐지 포함 중 DART 매핑되는 것) | 매일 (최근 2개 사업연도 재수집) |
+| `dart_fin` 지배주주 순이익 열 | `net_income_controlling`(3개월 값, 사업보고서는 연간) + `_cum`(누적) + `nic_source`. 지주사처럼 비지배지분이 큰 회사의 EPS용. 연결은 아래 `dart_fin_owner` 값, 별도는 `net_income` 그대로 (방침은 아래 한계 참고). 매 `kr-public` 실행 끝에 전체 `dart_fin`에 다시 붙인다 | OpenDART `fnlttSinglAcntAll` | `dart_fin`과 같음 | 매일 |
+| `dart_fin_owner` (symbol=ALL) | 연결(CFS) 보고서별 지배주주 순이익 원본: `fin_rcept_no`(받을 때의 `dart_fin` 접수번호), `rcept_no`(응답), `status`, `has_data`, `source`, 값 2개. 키 = (symbol, bsns_year, reprt_code). `dart_fin` 보고서가 정정돼 접수번호가 바뀌면 다시 받는다 | OpenDART `fnlttSinglAcntAll` (회사·보고서당 1회) | `dart_fin` 연결 행 약 7.9만 건 | 매일 (실행당 `kr_public.dart_owner_max_calls` 8천 호출씩 백필, 최근 사업연도부터) |
 | `dart_dividend` (symbol=ALL) | 사업보고서 **배당에 관한 사항**: 주당 현금배당금(`dps_common`·`dps_pref`, 원, 중간·분기배당 포함 연간 합계), 현금배당수익률(%), 현금배당성향(%), 현금·주식배당 총액(백만원), 주당 주식배당, 순이익·EPS(연결 우선). 회사·사업연도당 1행, 배당 기록 없음은 `has_data=False`. `ts` = 결산일, `filed` = 접수일 | OpenDART `alotMatter` | 사업연도 2015~, `dart_fin`과 같은 종목(상장폐지 포함) | 매일 (실행당 8천 호출씩 백필 → 이후 새 사업보고서만) |
 | `kr_dividend_schedule` (symbol=ALL) | KR **배당 기준일·배당락일**: `ts` = 기준일, `ex_date` = 배당락일(KRX 거래일로 계산: 기준일 이하 마지막 거래일의 전 거래일), `dps`(주당 현금배당금, 원), `kind`(결산·중간·분기), `stock_kind`(보통·우선), `divi_rate`(액면 대비 %), 주식배당률, `pay_date`. 공시일 없음 → 배당락 가격 보정(총수익)용 | KIS 예탁원정보 배당일정 (`HHKDB669102C0`) | 2010년 이후 KRX 상장 종목(상장폐지 포함), 기준일 2010~ (1년 앞 발표분까지) | 매일 (상장 종목은 7일마다 재조회) |
 | `dart_periodic_filings` (symbol=ALL) | 2015~2023 정기보고서(사업·반기·분기) 목록, 정정 포함: `ts`(접수일), `rcept_no`, `kind`, `period`('YYYY.MM'), `correction`. 2024~는 `dart_disclosures`에 있다. `dividends.first_filed()`가 둘을 합쳐 최초 접수일을 준다 | OpenDART 공시 목록 (회사별) | `dart_fin`과 같은 종목 | 회사당 1회 |
@@ -86,6 +88,19 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   - 4분기: 국내에는 4분기 보고서가 없다. 4분기는 `FY − Q3의 _cum`으로 계산하고, 알 수 있는 시점은 사업보고서 접수일이다. 4분기 잠정실적은 공시 목록의 "영업(잠정)실적"이 더 빠르다.
   - 정정: DART는 최신(정정) 값을 준다. 정정된 보고서는 `filed`가 정정일이라 시점은 보수적이다. 다만 정정 전 원래 값은 남지 않는다.
   - 업종: 금융업은 계정이 달라 매출액·영업이익이 비는 경우가 있다 (영업수익 등).
+  - **지배주주 순이익** (`net_income_controlling`, `nic_source`):
+    - `net_income`은 연결 당기순이익 전체(비지배지분 몫 포함)다. 주요계정 API(`fnlttMultiAcnt`)에는 지배주주 항목이 없어(당기순이익 2행 모두 전체) 단일회사 전체 재무제표(`fnlttSinglAcntAll`)에서 따로 받는다. 예: SK 2024 반기 3개월 전체 4,541억 중 지배 1,810억.
+    - `cfs`: 연결 재무제표의 "지배기업 소유주 귀속 당기순이익" (표준 계정 ID, 없으면 계정명. 포괄이익 지배분은 쓰지 않는다).
+    - `cfs_signfix`: 지배 + 비지배 ≠ 전체인데 지배 값의 부호를 바꾸면 맞는 경우 (제출 오류 보정).
+    - `cfs_no_nci`: 연결인데 지배·비지배 구분 행이 아예 없음 → 비지배지분이 없다고 보고 당기순이익 전체.
+    - **`ofs`: 별도재무제표만 있는 회사는 지배주주 순이익 = 당기순이익으로 둔다.** 별도만 낸다는 건 연결할 종속회사가 없다는 뜻이라 비지배지분이 생기지 않는다. 엔진에서 엄격하게 쓰려면 `nic_source == 'ofs'`를 걸러 NaN으로 바꾸면 된다.
+    - `cfs_missing`: 연결인데 지배주주 순이익을 못 찾았거나(포괄이익만 나눈 회사 등) 아직 백필 전 → NaN. 표본 62건(2015~2026 무작위) 중 2건(3%).
+    - 시점·4분기·정정 규칙은 다른 `dart_fin` 열과 같다 (`filed`, 4분기 = FY − Q3 `_cum`). 연결 보고서는 `dart_fin`과 같은 접수번호로 받은 값만 붙이고, 정정으로 접수번호가 바뀌면 다시 받을 때까지 NaN.
+    - `fnlttSinglAcntAll`의 2015 분기·반기는 비어 있는 경우가 많다 (삼성전자 2015 3분기 013). 2015 사업보고서는 있다.
+    - 금융지주·은행(예: 105560, 055550)은 `fnlttMultiAcnt`에 없어 `dart_fin`에 행이 없고, 따라서 지배주주 순이익도 없다.
+  - **EPS용 주식수** (수집 안 함, 확인만):
+    - `krx_1d.shares`는 종목코드별 상장주식수라 보통주(코드 끝 0)·우선주(끝 5·7 등)가 따로 있다. 자기주식을 빼지 않은 값이다.
+    - 자기주식: OpenDART `stockTotqySttus`(주식의 총수: 발행·자기주식·유통주식수, 보통·우선 구분)와 `tesstkAcqsDspsSttus`(자기주식 취득·처분 현황)가 정기보고서마다 있다. 다만 초기 연도는 비어 있다 (삼성전자 2015 사업보고서는 두 API 모두 '-'). 회사·보고서당 1회라 백필하면 약 12만 호출(하루 2회 × 8천 기준 약 8일). 필요하면 개발·점검 HQ가 정한다.
 - **배당 데이터 시점** (검토: `docs/research/2026-11-16-dividend-data-sources.md`):
   - `dart_dividend`: DART가 최신(정정) 보고서를 주므로 `filed`가 정정일인 행이 많다 (결산일 +120일 넘는 행 22%, +1년 넘는 행 6%. 예: 현대차 2015 → 2022-02). **최초 접수일**(`collectors.dividends.first_filed()`, `kind='사업보고서'`, `period`=결산 'YYYY.MM') 다음 날부터 쓴다. 값은 정정 후 값이라 정정이 배당 수치를 바꿨다면 아주 약한 미래참조가 남는다. 사업보고서(3월)는 배당결정 공시(보통 2월, `dart_disclosures`의 "현금ㆍ현물배당결정")보다 늦다 → 그 점에선 보수적. 같은 문제가 `dart_fin`에도 있으니 재무 전략도 `first_filed()`를 쓰면 된다.
   - `us_dividends`: 공시일이 없다. 배당은 배당락 전에 발표되므로 `ts`(배당락일)부터 쓰면 미래참조는 없지만 늦다 (실제 발표는 보통 1~4주 전).
