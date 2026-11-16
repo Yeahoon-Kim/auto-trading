@@ -39,7 +39,8 @@ SYSTEM = """너는 헤지펀드 운영팀(ops-reporter)이다. 아래 '주간 �
 - 숫자는 표에서 그대로 옮긴다. 표에 없는 숫자를 만들지 않는다. 추정하면 "추정"이라고 쓴다.
 - 형식(순서·머리말 고정):
   ■ 지난주 요약 — 데이터·LLM·리서치·운용을 한 줄씩
-  ■ 문제 — 🔴 이력, 수집 오류, LLM 실패, 리스크 발동. 없으면 "문제 없음"
+  ■ 문제 — 표의 "현재 미해결" 수집 오류, 현재 신선도 점검, LLM 실패, 리스크 발동. 없으면 "문제 없음".
+    기간 중 발생 후 복구된 오류·🔴 이력·로그 ERROR는 이미 해결됐으므로 문제가 아니라 '지난주 요약'에 건수로만 쓴다
   ■ 퇴출 검토 대상 — 표의 '퇴출 조건' 칸이 근접·도달·걸림인 전략. 운용 중 전략이 없거나 해당이 없으면 "없음"
   ■ 다음 주 HQ 배정 제안 — 담당 영역(데이터 수집 / 리서치(quant-researcher·validator) / 리스크·스키마 / 시장정보·운영)과
     할 일 한 줄씩. 판정 대기 lab은 lab id와 함께, 착수 후보는 표의 '대기열 우선순위 상' 항목에서 1~2건 제안.
@@ -70,11 +71,11 @@ def _days(start: date, end: date) -> list[str]:
 
 # ── ① 데이터 상태 ─────────────────────────────────────────────────────────────
 
-def _collect_logs(days: list[str]) -> dict:
+def _collect_logs(days: list[str], open_keys: set[tuple[str, str]] | None = None) -> dict:
     """logs/collect_{날짜}.log 의 ERROR·WARNING 건수와 위치별 상위 예시. 로그 없는 날도 센다."""
     cnt: dict[str, Counter] = {"ERROR": Counter(), "WARNING": Counter()}
     first: dict[tuple, str] = {}
-    per_day, missing = {}, []
+    per_day, missing, n_open = {}, [], 0
     for day in days:
         p = dr.LOG_DIR / f"collect_{day}.log"
         if not p.exists():
@@ -89,9 +90,10 @@ def _collect_logs(days: list[str]) -> dict:
             cnt[lv][loc] += 1
             first.setdefault((lv, loc), dr._mask(msg)[:100])
             e, w = e + (lv == "ERROR"), w + (lv == "WARNING")
+            n_open += lv == "ERROR" and dr.split_log_error(msg, open_keys or set())
         per_day[day] = (e, w)
     top = {lv: [(loc, n, first[(lv, loc)]) for loc, n in c.most_common(3)] for lv, c in cnt.items()}
-    return {"errors": sum(cnt["ERROR"].values()), "warnings": sum(cnt["WARNING"].values()),
+    return {"errors": sum(cnt["ERROR"].values()), "open": n_open, "warnings": sum(cnt["WARNING"].values()),
             "per_day": per_day, "missing": missing, "top": top}
 
 
@@ -309,7 +311,9 @@ def collect(week: str | None = None, today: date | None = None) -> dict:
     label, s, e = period(week, today)
     start, end = f"{s:%Y-%m-%d}", f"{e:%Y-%m-%d}"
     days = _days(s, e)
-    return {"week": label, "start": start, "end": end, "logs": _collect_logs(days),
+    errors = dr._error_state()  # 지금 시점의 상태DB 기준 (지난 주를 다시 만들어도 "현재" 미해결)
+    open_keys = {(d, sym) for d, sym, _ in errors["open"]}
+    return {"week": label, "start": start, "end": end, "logs": _collect_logs(days, open_keys), "errors": errors,
             "health": _health_history(days), "growth": _size_week(start, end),
             "llm": _llm_week(start, end), "research": _research(start, end), "ops": _operations(start, end)}
 
@@ -322,8 +326,14 @@ def _r(x: float | None) -> str:
 
 def table(f: dict) -> str:
     L = [f"# 주간 사실 표 {f['week']} ({f['start']} ~ {f['end']}, KST)", "", "## ① 데이터 상태"]
+    errs = f.get("errors") or {"open": [], "recovered": [], "failed": None}
+    if errs.get("failed"):
+        L.append(f"- 수집 상태DB 읽기 실패: {errs['failed']}")
+    L.append(f"- 수집 오류 현재 미해결 {len(errs['open'])}건 / 기간 중 발생 후 복구됨 {len(errs['recovered'])}건 (상태DB 지금 기준)")
+    L += [f"  - 미해결 {d} {sym}: {m}" for d, sym, m in errs["open"][:5]]
     lg = f["logs"]
-    L.append(f"- 수집 로그: ERROR {lg['errors']}건, WARNING {lg['warnings']}건"
+    L.append(f"- 수집 로그(기간 중 발생 기록, 현재 문제 아님): ERROR {lg['errors']}건"
+             f"(그중 지금 미해결 종목 {lg.get('open', 0)}건), WARNING {lg['warnings']}건"
              + (f" · 로그 없는 날 {len(lg['missing'])}일 ({', '.join(d[5:] for d in lg['missing'])})" if lg["missing"] else ""))
     bad = [f"{d[5:]} E{e}/W{w}" for d, (e, w) in lg["per_day"].items() if e or w]
     if bad:
@@ -331,7 +341,7 @@ def table(f: dict) -> str:
     for lv in ("ERROR", "WARNING"):
         L += [f"  - {lv} {loc} ×{n}: {msg}" for loc, n, msg in lg["top"][lv]]
     h = f["health"]
-    L.append(f"- 상태 점검 (logs/task-cli-*.log, {h['ran_days']}일 기록): 🔴 {h['red']}건, 🟡 {h['yellow']}건"
+    L.append(f"- 상태 점검 이력 (logs/task-cli-*.log, {h['ran_days']}일 기록, 당시 알림 — 이미 복구된 것 포함): 🔴 {h['red']}건, 🟡 {h['yellow']}건"
              + (" — 날짜별 " + ", ".join(f"{d[5:]} {n}" for d, n in h["red_days"].items()) if h["red_days"] else ""))
     L += [f"  - 🔴 {ds} ×{n}: {msg}" for ds, n, msg in h["red_by"]]
     g = f["growth"]

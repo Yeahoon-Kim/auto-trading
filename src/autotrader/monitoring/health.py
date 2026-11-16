@@ -38,6 +38,7 @@ RULES = {
     "ecos": {"bdays": 5, "tz": "Asia/Seoul", "close_hour": 16},
     "fred": {"bdays": 10, "tz": "America/New_York", "close_hour": 17},  # 주간 지표(NFCI 등)는 발표가 늦음
 }
+RECENT_ERROR_HOURS = 6  # 이보다 최근에 난 오류는 데이터가 신선해도 아직 진행 중일 수 있어 미해결로 본다
 INACTIVE_HOURS = 30   # 데이터셋 전체가 이 시간 동안 한 번도 갱신 안 되면 수집기 미실행 의심
 MIN_FREE_GB = 10
 
@@ -68,9 +69,40 @@ def _expected_session(rule: dict, now: pd.Timestamp) -> pd.Timestamp:
     return day
 
 
+def _stale(g: pd.DataFrame, rule: dict, now: pd.Timestamp) -> pd.DataFrame:
+    """허용 지연보다 오래된 행."""
+    if "hours" in rule:
+        return g[g["last_ts"] < now - pd.Timedelta(hours=rule["hours"])]
+    exp = _expected_session(rule, now).date()
+    last_local = g["last_ts"].dt.tz_convert(rule["tz"]).dt.tz_localize(None).values.astype("datetime64[D]")
+    return g[np.busday_count(last_local, np.datetime64(exp)) > rule["bdays"]]
+
+
+def split_errors(st: pd.DataFrame, now: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """status=error 행을 (미해결, 복구됨)으로 나눈다.
+
+    수집기는 성공해야만 status를 ok로 덮어쓴다. 그런데 이미 최신이라 다시 받을 게 없는 종목은 성공 기록이
+    없어서 error가 남는다. 그래서 다음을 모두 만족하면 복구된 것으로 본다.
+    - 오류가 RECENT_ERROR_HOURS보다 오래됨 (updated_at = 오류 시각)
+    - 데이터가 신선함 (마지막 봉이 신선도 허용 지연 안)
+    매일 실패하는 종목은 오류 시각이 계속 갱신되고 데이터도 낡아가므로 계속 미해결로 남는다.
+    """
+    errs = st[st["status"] == "error"]
+    fixed = pd.Series(False, index=errs.index)
+    for ds, g in errs.groupby("dataset"):
+        rule = RULES.get(ds)
+        if rule is None:
+            continue  # 신선도 기준이 없는 데이터셋은 판단 못 함 → 미해결 유지
+        g = g[g["last_ts"].notna() & (g["updated_at"] < now - pd.Timedelta(hours=RECENT_ERROR_HOURS))]
+        if len(g):
+            fixed[g.index.difference(_stale(g, rule, now).index)] = True
+    return errs[~fixed], errs[fixed]
+
+
 def check(now: pd.Timestamp | None = None) -> list[Issue]:
     now = now or pd.Timestamp.now(tz="UTC")
     st = _state()
+    open_errs, _ = split_errors(st, now)
     issues: list[Issue] = []
     for ds, g in st.groupby("dataset"):
         rule = RULES.get(ds)
@@ -81,18 +113,12 @@ def check(now: pd.Timestamp | None = None) -> list[Issue]:
             u = store.load_universe("kr_daily", max_age_days=10**6)
             if not u.empty:
                 g = g[~g["symbol"].isin(u.loc[u["delisted"].notna(), "code"])]
-        if "hours" in rule:
-            stale = g[g["last_ts"] < now - pd.Timedelta(hours=rule["hours"])]
-        else:
-            exp = _expected_session(rule, now).date()
-            last_local = g["last_ts"].dt.tz_convert(rule["tz"]).dt.tz_localize(None).values.astype("datetime64[D]")
-            lag = np.busday_count(last_local, np.datetime64(exp))
-            stale = g[lag > rule["bdays"]]
+        stale = _stale(g, rule, now)
         if len(stale):
             worst = stale.nsmallest(3, "last_ts")
             sample = ", ".join(f"{s}({t:%m-%d %H:%M})" for s, t in zip(worst["symbol"], worst["last_ts"]))
             issues.append(Issue("warn", ds, f"오래된 데이터 {len(stale)}/{len(g)}종목 — 예: {sample}"))
-        errs = st[(st["dataset"] == ds) & (st["status"] == "error")]
+        errs = open_errs[open_errs["dataset"] == ds]  # 복구된 과거 오류는 빼고, 지금도 실패 중인 것만
         if len(errs):
             issues.append(Issue("error", ds, f"수집 오류 {len(errs)}종목 — 예: {errs['symbol'].iloc[0]}: "
                                              f"{str(errs['error'].iloc[0])[:120]}"))
