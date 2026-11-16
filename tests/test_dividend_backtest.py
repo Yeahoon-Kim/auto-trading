@@ -1,5 +1,6 @@
 """KR 배당 재투자(총수익)와 배당 신호 필드(dps, div_yield) 시점 테스트. 합성 데이터, 임시 저장소."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -91,6 +92,41 @@ def test_kr_dps_visible_only_from_day_after_first_filing(tmp_store):
     assert p.div_yield["900001"].loc["2024-03-14"] == pytest.approx(0.05)
     assert p.div_yield["900001"].loc["2024-03-20"] == pytest.approx(0.05)
     assert bdata.check_dividend_causality(p)["passed"]
+
+
+def test_kr_preferred_share_gets_dps_pref(tmp_store):
+    # 우선주 900005(보통주 900000)는 같은 사업보고서의 dps_pref, 같은 시점 규칙
+    _write_kr([10000.0] * 10, sym="900000")
+    _write_kr([8000.0] * 10, sym="900005")
+    store.write("kr_dividend_schedule", "ALL", pd.DataFrame({
+        "ts": [_kst("2023-12-31")], "symbol": ["900005"], "kind": ["결산"], "stock_kind": ["우선"], "dps": [505],
+        "ex_date": [pd.Timestamp("2023-12-27")]}), key=["ts", "symbol"])
+    _write_dart()                                                  # 최초 접수일 기록 (회사 00999999)
+    store.write("dart_dividend", "ALL", pd.DataFrame({
+        "ts": [_kst("2023-12-31")], "corp_code": ["00999999"], "symbol": ["900000"], "bsns_year": [2023],
+        "reprt_code": ["11011"], "filed": [_kst("2025-01-10")], "has_data": [True],
+        "dps_common": [500.0], "dps_pref": [505.0]}), key=["corp_code", "bsns_year", "reprt_code"])
+    p = bdata.load("kr_stock", ["900000", "900005"], lockbox=True, fields=("dps", "div_yield"))
+    assert p.dps["900005"].loc[:"2024-03-13"].isna().all()
+    assert p.dps["900005"].loc["2024-03-14"] == 505.0 and p.dps["900000"].loc["2024-03-14"] == 500.0
+    assert p.div_yield["900005"].loc["2024-03-14"] == pytest.approx(505 / 8000)
+
+
+def test_kr_dps_parse_gap_is_unknown_not_zero(tmp_store):
+    # 배당성향은 있는데 주당배당금이 빈 행(파싱 누락) → 0이 아니라 NaN. 배당 흔적이 없으면 0(무배당).
+    _write_kr([10000.0] * 10)
+    _write_dart()
+
+    def dart(payout):
+        store.write("dart_dividend", "ALL", pd.DataFrame({
+            "ts": [_kst("2023-12-31")], "corp_code": ["00999999"], "symbol": ["900001"], "bsns_year": [2023],
+            "reprt_code": ["11011"], "filed": [_kst("2025-01-10")], "has_data": [True],
+            "dps_common": [np.nan], "payout_ratio": [payout]}), key=["corp_code", "bsns_year", "reprt_code"])
+
+    dart(14.3)
+    assert _kr(fields=("dps",)).dps["900001"].isna().all()
+    dart(np.nan)
+    assert _kr(fields=("dps",)).dps["900001"].loc["2024-03-14"] == 0.0
 
 
 def test_kr_dps_falls_back_to_filed_when_first_filing_unknown(tmp_store):

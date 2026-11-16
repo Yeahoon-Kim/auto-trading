@@ -498,7 +498,7 @@ DIV_STALE_DAYS = 550          # KR: 마지막 사업보고서 값이 이보다 �
 US_DIV_START = pd.Timestamp("2016-01-01")   # us_dividends 시작 → 그 뒤 1년이 지나야 12개월 합계가 온전하다
 US_DIV_PLACE_DAYS = 5         # US 배당락일에 봉이 없으면 이 안의 다음 봉에 붙인다
 DIV_TIMING = {
-    "kr_stock": "dps = 최신 사업보고서 주당 현금배당(dart_dividend dps_common, 원, 연간 합계), "
+    "kr_stock": "dps = 최신 사업보고서 주당 현금배당(dart_dividend, 보통주 dps_common·첫 우선주 dps_pref, 원, 연간 합계), "
                 "최초 접수일(first_filed) 다음 날부터. 그날 주식 기준으로 분할 환산. div_yield = dps / raw_close",
     "us_stock": "dps = 직전 365일 정기 현금배당 합계(us_dividends 배당락일, 특별배당 제외), 배당락일 당일부터. "
                 "금액은 us_1d close 기준(분할 반영, USD). div_yield = dps / 그날 close(USD)",
@@ -521,6 +521,8 @@ def dividends(market: str, symbols=None, asof=None) -> pd.DataFrame:
         dv = dv[dv["has_data"].astype(bool)]
         if "reprt_code" in dv:
             dv = dv[dv["reprt_code"] == "11011"]
+        dv = dv.assign(symbol=dv["symbol"].str.strip(), dps=_dps_or_zero(dv, dv["dps_common"]))
+        dv = pd.concat([dv, _kr_pref_rows(dv)], ignore_index=True)
         if symbols not in (None, "ALL", "KOSPI", "KOSDAQ"):
             dv = dv[dv["symbol"].isin([symbols] if isinstance(symbols, str) else symbols)]
         dv = dv.assign(period=dv["ts"].dt.tz_convert(TZ["kr_stock"]).dt.strftime("%Y.%m"))
@@ -536,8 +538,8 @@ def dividends(market: str, symbols=None, asof=None) -> pd.DataFrame:
             dv = dv.assign(first_filed=pd.NaT)
         fallback = dv["first_filed"].isna()
         src = _local_date(pd.to_datetime(dv["first_filed"], utc=True).where(~fallback, dv["filed"]), TZ["kr_stock"])
-        out = pd.DataFrame({"symbol": dv["symbol"].str.strip(), "src_date": src, "known": src + pd.Timedelta(days=1),
-                            "dps": dv["dps_common"].fillna(0.0).astype(float),   # 보고서는 있는데 값 없음 = 무배당
+        out = pd.DataFrame({"symbol": dv["symbol"], "src_date": src, "known": src + pd.Timedelta(days=1),
+                            "dps": dv["dps"].astype(float),
                             "year": dv["bsns_year"], "ref": _local_date(dv["ts"], TZ["kr_stock"]),
                             "filed_fallback": fallback})
         if asof is not None:
@@ -556,6 +558,28 @@ def dividends(market: str, symbols=None, asof=None) -> pd.DataFrame:
     else:
         raise ValueError(f"배당 데이터는 kr_stock·us_stock만 있다: {market}")
     return out.sort_values(["symbol", "known"]).reset_index(drop=True)
+
+
+def _dps_or_zero(dv: pd.DataFrame, dps: pd.Series) -> pd.Series:
+    """보고서는 있는데 주당배당금이 비면 무배당(0). 단 배당성향·배당총액이 있으면 파싱 누락이라 모름(NaN)으로 둔다."""
+    col = lambda c: dv[c] if c in dv else pd.Series(np.nan, index=dv.index)
+    paid = (col("payout_ratio").fillna(0) > 0) | (col("cash_div_total").fillna(0) > 0)
+    return dps.where(dps.notna(), np.where(paid, np.nan, 0.0)).astype(float)
+
+
+def _kr_pref_rows(dv: pd.DataFrame) -> pd.DataFrame:
+    """우선주(종목코드 따로)에 같은 회사 사업보고서의 dps_pref를 붙인 행.
+    우선주 목록·종류는 kr_dividend_schedule의 stock_kind, 보통주는 우선주 코드 앞 5자리 + '0' (예: 005935 → 005930).
+    사업보고서에는 우선주 칸이 하나뿐이라 첫 번째 우선주('우선')에만 붙인다. 2우선 이하는 금액이 다를 수 있어 비운다."""
+    s = store.read("kr_dividend_schedule", "ALL")
+    if s.empty or "dps_pref" not in dv:
+        return dv.iloc[:0]
+    kinds = s.drop_duplicates("symbol", keep="last").set_index("symbol")["stock_kind"].str.strip()
+    pref = kinds[kinds == "우선"].index
+    m = pd.DataFrame({"_pref": pref, "_common": pref.str[:5] + "0"})
+    out = dv.merge(m, left_on="symbol", right_on="_common")
+    out = out.assign(symbol=out["_pref"], dps=_dps_or_zero(out, out["dps_pref"])).drop(columns=["_pref", "_common"])
+    return out.drop_duplicates(["symbol", "corp_code", "bsns_year"])
 
 
 def _div_basis(long: pd.DataFrame, market: str) -> pd.DataFrame:
