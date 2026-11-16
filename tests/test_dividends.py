@@ -153,3 +153,15 @@ def test_parse_schedule():
     assert d["ts"].iloc[0] == pd.Timestamp("2025-03-31", tz="Asia/Seoul")
     assert d["ex_date"].iloc[0] == pd.Timestamp("2025-03-28") and d["pay_date"].iloc[0] == pd.Timestamp("2025-05-20")
     assert dv.parse_schedule([], "005930", td).empty
+
+
+def test_schedule_rows_splits_at_100():
+    """월배당 종목: 100건이 차면 기간을 나눠 다시 받는다."""
+    dates = pd.date_range("2010-01-15", "2024-12-15", freq="MS") + pd.Timedelta(days=14)  # 180개월
+
+    def fetch(code, f, t):
+        hit = [d for d in dates if pd.Timestamp(f) <= d <= pd.Timestamp(t)]
+        return [{"record_date": f"{d:%Y%m%d}"} for d in hit[:100]]
+
+    rows = dv.schedule_rows(fetch, "172580", "20100101", "20251231")
+    assert len(rows) == len(dates) and len({r["record_date"] for r in rows}) == len(dates)

@@ -299,6 +299,20 @@ def parse_schedule(rows: list[dict], code: str, trading_days: pd.DatetimeIndex) 
     return out.dropna(subset=["ts"]).drop_duplicates(["ts", "symbol", "kind", "stock_kind"], keep="last")
 
 
+def schedule_rows(fetch, code: str, start: str, end: str) -> list[dict]:
+    """fetch(code, start, end) → rows. 한 번에 100건까지만 오므로 100건이면 기간을 반으로 나눠 다시 받는다 (월배당 종목)."""
+    rows = fetch(code, start, end)
+    if len(rows) < 100:
+        return rows
+    a, b = pd.Timestamp(start), pd.Timestamp(end)
+    if (b - a).days < 2:
+        logger.warning(f"{SCHED_DS} {code} {start}~{end}: 100건 — 더 나눌 수 없음")
+        return rows
+    mid = a + (b - a) / 2
+    return (schedule_rows(fetch, code, start, mid.strftime("%Y%m%d"))
+            + schedule_rows(fetch, code, (mid + pd.Timedelta(days=1)).strftime("%Y%m%d"), end))
+
+
 def _updated_at(ds: str) -> dict[str, pd.Timestamp]:
     with store._db() as con:
         rows = con.execute("SELECT symbol, updated_at FROM state WHERE dataset=? AND backfill_done=1", (ds,)).fetchall()
@@ -335,12 +349,13 @@ def collect_kr_schedule() -> None:
             buf.clear()
             got.clear()
 
-        for i, code in enumerate(todo, 1):
+        def fetch(code: str, f: str, t: str) -> list[dict]:
             j = _get("/uapi/domestic-stock/v1/ksdinfo/dividend", "HHKDB669102C0",
-                     {"CTS": "", "GB1": "0", "F_DT": start, "T_DT": end, "SHT_CD": code, "HIGH_GB": ""})
-            rows = j.get("output1") or []
-            if len(rows) >= 100:
-                logger.warning(f"{ds} {code}: 100건 — 잘렸을 수 있음")
+                     {"CTS": "", "GB1": "0", "F_DT": f, "T_DT": t, "SHT_CD": code, "HIGH_GB": ""})
+            return j.get("output1") or []
+
+        for i, code in enumerate(todo, 1):
+            rows = schedule_rows(fetch, code, start, end)
             buf.append(parse_schedule(rows, code, days))
             got.append(code)
             if len(got) >= 300:
