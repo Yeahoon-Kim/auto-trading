@@ -16,6 +16,7 @@ markets:
       "2024-01-01": 0.18
       "2025-01-01": 0.15
       "2026-01-01": 0.20
+    dividend_tax_pct: 15.4   # 배당소득세 14% + 지방소득세 1.4% (백테스트 배당 재투자 때 차감)
   us_stock:
     broker: kis
     timezone: America/New_York

@@ -74,7 +74,10 @@ store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  
   - `us_dividends`: 공시일이 없다. 배당은 배당락 전에 발표되므로 `ts`(배당락일)부터 쓰면 미래참조는 없지만 늦다 (실제 발표는 보통 1~4주 전).
   - `us_dividend_announcements`: Alpaca의 `declaration_date`는 실제 결의일보다 늦다 (2022~ 대개 배당락 1~4일 전, 2020~21은 배당락 뒤도 많음). `ts` 다음 날부터 쓰면 미래참조는 없지만 **발표 이벤트 시점으로 쓰면 안 된다.** 실제 결의일이 필요하면 다른 소스가 필요하다 (리서치 문서 참고).
   - `kr_dividend_schedule`: 공시일이 없다. 배당락일 가격 보정에만 쓰고, 신호(배당수익률 등)에는 `dart_dividend` + 최초 접수일을 쓴다. 배당락일은 기준일 전에 정해져 있으므로 배당락일 당일 보정은 미래참조가 아니다. 마지막 수집 거래일 뒤 기준일은 `ex_date`가 비어 있다 (다음 갱신 때 채워짐).
-  - `kr_adj_factor`는 분할·증자만 반영하고 **배당은 반영하지 않는다** (삼성전자 수정계수는 2018-05 액면분할 외 변화 없음). KR 총수익은 `dart_dividend` 등으로 따로 더해야 한다.
+  - `kr_adj_factor`는 분할·증자만 반영하고 배당은 반영하지 않는다 (삼성전자 수정계수는 2018-05 액면분할 외 변화 없음).
+    대신 백테스트 엔진(`backtest/data.py` `load("kr_stock")`)이 `kr_dividend_schedule`의 배당락일에 배당소득세 15.4%(`config/settings.yaml` `kr_stock.dividend_tax_pct`)를 뗀 배당을 재투자해 **총수익**으로 계산한다.
+    세율은 `dividend_tax` 인자(lab.yaml `dividend_tax`)로 바꾸고, `reinvest_dividends=False`면 예전처럼 가격 수익만 계산한다. report에 "KR 배당 재투자 반영" 여부가 찍힌다.
+    `store.read("kr_adj_factor")`로 직접 수정주가를 만들면 여전히 배당이 빠진다.
 - **legacy 재무제표 (US)**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다. 같은 기간 중복과 9개월 누적 행이 섞여 있다.
 - **legacy US 일봉**: 분할 반영 가격이고 상장폐지 종목이 없다 (생존편향).
 - **KR 분봉 유니버스**: 시총 상위 350개 + 실제 KOSPI200·KOSDAQ150 구성종목(2026-08 기준) 합집합, 420개.

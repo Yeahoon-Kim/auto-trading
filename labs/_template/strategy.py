@@ -16,6 +16,9 @@ def generate_signals(data, params: dict) -> pd.DataFrame:
 
     data: Panel — data.close, data.open (그리고 lab.yaml fields에 적은 것)이 날짜 × 종목 DataFrame.
           kr_stock 가격은 수정주가, data.raw_close는 원본가. data.market, data.timeframe.
+          수정주가(close·open)는 배당 재투자까지 반영돼 과거 가격 수준이 실제보다 낮다 (최근 가격 = 실제).
+          가격 수준 필터(최소 주가 등)나 배당수익률 분모에는 raw_close를 쓴다.
+          배당 신호는 fields에 dps·div_yield를 적고 data.dps, data.div_yield로 읽는다 (그날 알 수 있는 값만).
     반환: 1.0 = 자산 100%. 합 < 1이면 나머지 현금, 음수는 공매도. 없는 날짜는 직전 비중 유지.
 
     미래참조 금지: rolling(center=True), 전체 기간 평균·표준화, bfill, shift(-n) 금지.
