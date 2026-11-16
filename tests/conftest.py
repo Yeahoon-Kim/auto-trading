@@ -28,8 +28,10 @@ logger.add = _orig_add  # 이후 테스트 안에서 직접 쓰는 add()는 원�
 
 # 모듈 상수 → (모듈, 속성, 임시 폴더 아래 상대 경로)
 _PATHS = [
+    ("autotrader.data.store", "DATA_ROOT", "data"),
     ("autotrader.data.store", "DATA_DIR", "data/processed"),
     ("autotrader.data.store", "STATE_DB", "data/state.sqlite"),
+    ("autotrader.data.collectors.legacy_db", "OUT", "data/processed/legacy"),
     ("autotrader.llm.claude_cli", "CALL_LOG", "logs/llm_calls.jsonl"),
     ("autotrader.llm.decision_log", "LOG", "data/llm/decisions.jsonl"),
     ("autotrader.monitoring.notify", "ALERT_LOG", "logs/alerts.log"),
@@ -49,6 +51,10 @@ _PATHS = [
 def _isolate_project_paths(tmp_path_factory, monkeypatch):
     """모든 테스트에서 프로젝트 경로 상수를 임시 폴더로 돌린다. 개별 테스트가 다시 patch 해도 된다."""
     base = tmp_path_factory.mktemp("isolated_root")
+    # AUTOTRADER_DATA_DIR(메인 data/ 지정)이 켜진 셸·.env 에서 돌려도, 테스트가 띄우는 하위 프로세스까지
+    # 임시 data/ 를 보게 한다. 이미 import 된 store 상수는 아래 _PATHS 로 돌린다.
+    (base / "data").mkdir()
+    monkeypatch.setenv("AUTOTRADER_DATA_DIR", str(base / "data"))
     for mod_name, attr, rel in _PATHS:
         try:
             mod = importlib.import_module(mod_name)

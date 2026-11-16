@@ -61,6 +61,13 @@ uv run python -m autotrader.backtest.lab labs/L001-이름            # 개발 �
 uv run python -m autotrader.backtest.lab labs/L001-이름 --quick    # ±20% 민감도 생략 (개발 중)
 uv run python -m autotrader.backtest.lab labs/L001-이름 --lockbox  # 최종 판정 때 1회 (기준 6). lab.yaml lockbox에 자동 기록
 ```
+- **작업 폴더(git worktree)에서 실행할 때**: 작업 폴더의 `data/`는 비어 있다. `AUTOTRADER_DATA_DIR`을 메인 폴더 `data/`로 지정하면
+  메인 데이터를 읽고, 결과는 작업 폴더의 `labs/<lab>/results/`에 생긴다. 작업 폴더에서는 수집기를 돌리지 않는다(메인 데이터에 쓰게 된다).
+  자세한 것은 `docs/data.md`의 "데이터 위치" 참고.
+  ```powershell
+  $env:AUTOTRADER_DATA_DIR = "C:\Users\apple\Claude\auto-trading\data"
+  uv run python -m autotrader.backtest.lab labs/L001-이름 --quick
+  ```
 - 결과: `labs/<lab>/results/<실행시각>/report.md`, `summary.json`, 수익률 parquet. 판정은 하지 않는다 (validator 검증 후).
 - 데이터: `autotrader.backtest.data.load()` — 잠금 구간은 `--lockbox` 없이는 읽히지 않는다.
   KR은 `krx_1d`(상장폐지 포함) + 수정계수, US는 `us_1d`(현재 종목 → 생존편향 있음), 코인은 1분봉을 `timeframe`으로 묶음.

@@ -14,8 +14,25 @@ lab에서 읽기:
 from autotrader.data import store
 df = store.read("kr_1d", "005930", start="2020-01-01")     # 한 종목
 f  = store.read("kr_adj_factor", "005930")                 # 수정주가 = close × factor
-store.query("SELECT ... FROM 'data/processed/binance_um_funding/*/*.parquet'")  # 여러 종목
+store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/*.parquet'")  # 여러 종목
 ```
+
+경로는 `'data/processed/...'`처럼 상대 경로로 쓰지 말고 `store.DATA_DIR`에서 만든다 (실행 위치·`AUTOTRADER_DATA_DIR`과 무관하게 맞는 폴더를 본다).
+
+## 데이터 위치 (`AUTOTRADER_DATA_DIR`)
+
+- 데이터 루트는 `processed/`와 `state.sqlite`가 들어 있는 `data/` 폴더다. 코드에서는 `store.DATA_ROOT`, `store.DATA_DIR`(= `processed/`), `store.STATE_DB`.
+- 기본값은 코드 위치 기준 `data/` (메인 폴더면 메인 `data/`). 환경변수 또는 `.env`의 `AUTOTRADER_DATA_DIR`이 있으면 그 폴더를 쓴다. 지정한 폴더가 없으면 import 때 바로 오류를 낸다.
+- **작업 폴더(git worktree)에서 백테스트할 때**: 작업 폴더의 `data/`는 비어 있으니, 이 변수를 메인 폴더 `data/`로 지정한다.
+  ```powershell
+  $env:AUTOTRADER_DATA_DIR = "C:\Users\apple\Claude\auto-trading\data"
+  uv run python -m autotrader.backtest.lab labs/L001-kr-momentum-regime --quick
+  ```
+  lab 결과(`labs/<lab>/results/`)는 작업 폴더 쪽에 생긴다. `config/`·`logs/`·`reports/`도 작업 폴더 기준 그대로다.
+- **작업 폴더에서는 수집기(`autotrader.data.cli collect`, `scripts/collect_all.ps1`), 국면 재계산(`intel.market`), 스캐너를 돌리지 않는다.**
+  이 변수를 켠 채 돌리면 메인 `data/`에 직접 쓰게 되어, 정기 수집(메인 폴더 코드)과 충돌하거나 검토 안 된 코드로 데이터를 바꾸게 된다.
+- 테스트(`uv run pytest`)는 변수가 켜져 있어도 `tests/conftest.py`가 임시 폴더로 돌리므로 메인 `data/`를 건드리지 않는다.
+- 예외: LLM 판단 기록(`data/llm/decisions.jsonl`)은 데이터 루트와 상관없이 코드 위치 기준이다.
 
 ## 데이터셋
 

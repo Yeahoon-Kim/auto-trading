@@ -20,10 +20,29 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
+from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parents[3]
-DATA_DIR = ROOT / "data" / "processed"
-STATE_DB = ROOT / "data" / "state.sqlite"
+load_dotenv()
+
+ROOT = Path(__file__).resolve().parents[3]  # 코드·설정(config/) 기준. 데이터 위치와는 별개.
+
+
+def _data_root() -> Path:
+    """데이터 루트(processed/, state.sqlite 가 있는 data/ 폴더).
+    AUTOTRADER_DATA_DIR(환경변수 또는 .env)이 있으면 그 폴더, 없으면 코드 위치 기준 data/.
+    작업 폴더(git worktree)에서 메인 폴더 data/ 를 읽어 백테스트할 때 쓴다 — docs/data.md 참고."""
+    env = os.environ.get("AUTOTRADER_DATA_DIR", "").strip()
+    if not env:
+        return ROOT / "data"
+    p = Path(env).expanduser().resolve()
+    if not p.is_dir():
+        raise FileNotFoundError(f"AUTOTRADER_DATA_DIR 폴더가 없습니다: {p}")
+    return p
+
+
+DATA_ROOT = _data_root()
+DATA_DIR = DATA_ROOT / "processed"
+STATE_DB = DATA_ROOT / "state.sqlite"
 
 
 def _period_key(ts: pd.Series, dataset: str) -> pd.Series:
