@@ -27,7 +27,7 @@ import pandas as pd
 import yaml
 
 from . import benchmark, engine, trade
-from .data import Panel, check_dividend_causality, dev_end, load
+from .data import Panel, check_dividend_causality, check_fin_causality, dev_end, load
 
 REGIME_COL = {"kr_stock": "kospi_trend", "us_stock": "spx_trend",
               "crypto_spot": "btc_trend", "crypto_futures": "btc_trend"}
@@ -102,7 +102,7 @@ def _panel(cfg: dict, lockbox: bool) -> Panel:
     return load(cfg["market"], cfg.get("universe") or None, start=cfg.get("data_start") or None,
                 timeframe=cfg.get("timeframe", "1d"), fields=tuple(fields),
                 lockbox=lockbox, currency=cfg.get("currency") or None,
-                dividend_tax=cfg.get("dividend_tax"))
+                dividend_tax=cfg.get("dividend_tax"), fin_timing=cfg.get("fin_timing") or "first")
 
 
 def _kind(cfg: dict) -> str:
@@ -187,7 +187,8 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
 
     causal = R.causality(params)
     causal["dividend_fields"] = check_dividend_causality(panel)   # 배당 필드 자체의 시점 (필드가 없으면 통과)
-    causal["passed"] = causal["passed"] and causal["dividend_fields"]["passed"]
+    causal["fin_fields"] = check_fin_causality(panel)             # 재무 필드 자체의 시점 (필드가 없으면 통과)
+    causal["passed"] = causal["passed"] and causal["dividend_fields"]["passed"] and causal["fin_fields"]["passed"]
     base = wfrun(params)
     test = base["test"]
     rf = _rf(panel, test.returns.index)
@@ -370,13 +371,17 @@ def report(s: dict) -> str:
                          f"최초 접수일 없어 정정일로 시점을 잡은 행 {cov['filed_fallback']:,}개, 금액 모름 {cov['dps_unknown']:,}개")
         elif cov.get("rows"):
             lines.append(f"- 실행 시점 배당 데이터 범위: {cov['rows']:,}건, 배당락 {cov['first']}~{cov['last']}")
+    lines += _fin_lines(s["data"])
     if "causality" in s:
         c = s["causality"]
         df = c.get("dividend_fields") or {}
+        ff = c.get("fin_fields") or {}
         lines.append(f"- 미래참조 자동 검사: {'통과' if c['passed'] else '**실패**'} "
                      f"(데이터를 {len(c['cuts'])}곳에서 잘라 다시 계산한 신호 비교"
                      + (f"; 배당 필드 {', '.join(df['fields'])} 재구성 비교 "
-                        f"{'통과' if df['passed'] else '**실패**'}" if df.get("fields") else "") + ")")
+                        f"{'통과' if df['passed'] else '**실패**'}" if df.get("fields") else "")
+                     + (f"; 재무 필드 {', '.join(ff['fields'])} 재구성 비교 "
+                        f"{'통과' if ff['passed'] else '**실패**'}" if ff.get("fields") else "") + ")")
         lines.append(f"- 가설 커밋 상태: {s.get('hypothesis_committed')}")
     lines += ["", "## 결과 (비용 포함)",
               f"- 총수익 {_fmt(t.get('total_return'))}, CAGR {_fmt(t.get('cagr'))}, Sharpe {_fmt(t.get('sharpe'))} "
@@ -431,6 +436,23 @@ def report(s: dict) -> str:
                   for k, v in s["regimes"].items()]
     lines += ["", "반영 안 한 것: 공매도 대차 비용, 선물 펀딩비, 시장 충격, 양도소득세, 현금 이자."]
     return "\n".join(lines) + "\n"
+
+
+def _fin_lines(d: dict) -> list[str]:
+    """재무 필드를 쓴 lab: 시점 규칙과 실행 시점 원천 범위."""
+    if not d.get("fin_fields"):
+        return []
+    v = d.get("fin_data") or {}
+    out = [f"- 재무 필드 시점: {d['fin_fields']}"]
+    if v.get("rows"):
+        miss = ", ".join(f"{k} {x:.1%}" for k, x in (v.get("missing") or {}).items())
+        out.append(f"- 실행 시점 재무 데이터 범위: dart_fin {v['rows']:,}개 분기·{v['symbols']:,}종목, "
+                   f"공개일 {v['first']}~{v['last']}, 최초 접수일 없어 filed로 잡은 행 {v['fallback']:,}개, "
+                   f"최초 접수 뒤 정정된 행 {v['corrected']:,}개, 원화 아닌 보고서 제외 {v['non_krw_skipped']:,}개. "
+                   f"결측률(가격 있는 칸 기준): {miss}")
+    else:
+        out.append("- 실행 시점 재무 데이터 범위: **dart_fin 없음** (재무 필드 전부 비어 있음)")
+    return out
 
 
 def _dividend_line(s: dict) -> str:
