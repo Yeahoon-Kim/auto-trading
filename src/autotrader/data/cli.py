@@ -8,6 +8,7 @@
     uv run python -m autotrader.data.cli collect us
     uv run python -m autotrader.data.cli collect us-sip      # Alpaca 1분봉 2016~ (키 필요)
     uv run python -m autotrader.data.cli collect news        # Alpaca 뉴스 2015~ (키 필요)
+    uv run python -m autotrader.data.cli collect dividends   # 배당: DART 사업보고서(KR), Alpaca(US)
     uv run python -m autotrader.data.cli collect binance --symbols BTCUSDT ETHUSDT
     uv run python -m autotrader.data.cli status
 
@@ -29,7 +30,8 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("collect")
     c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
-                                      "us-minute", "us-sip", "news", "macro", "legacy", "kr-public"])
+                                      "us-minute", "us-sip", "news", "macro", "legacy", "kr-public",
+                                      "dividends"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
     h = sub.add_parser("health")
@@ -51,7 +53,18 @@ def main() -> None:
             notify.send(text)
         return
 
-    from .collectors import binance, kr_public, kr_stock, legacy_db, macro, news, upbit, us_alpaca, us_stock
+    from .collectors import (
+        binance,
+        dividends,
+        kr_public,
+        kr_stock,
+        legacy_db,
+        macro,
+        news,
+        upbit,
+        us_alpaca,
+        us_stock,
+    )
     from .collectors.common import keep_awake
     keep_awake()
     src = a.source
@@ -66,6 +79,8 @@ def main() -> None:
             legacy_db.run(a.symbols)
         elif src == "kr-public":
             kr_public.run(a.symbols)
+        elif src == "dividends":
+            dividends.run(a.symbols)
         elif src.startswith("kr"):
             kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
         elif src == "news":
