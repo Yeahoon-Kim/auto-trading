@@ -113,9 +113,10 @@ def todo_pairs(codes: pd.DataFrame, years: range, done: pd.DataFrame, now: pd.Ti
         d["fetched"] = pd.to_datetime(d["fetched"], utc=True)
         deadline = pd.to_datetime((d["bsns_year"] + 1).astype(str) + "-07-01", utc=True)
         ver = d["parser"].fillna(1) if "parser" in d else pd.Series(1, index=d.index)
-        # 1판 파서는 stock_knd가 "-"인 회사의 주당배당금을 놓쳤다 → 배당총액은 있는데 DPS가 빈 행은 다시
+        # 1판 파서는 stock_knd가 "-"인 회사의 주당배당금을 놓쳤다 → 배당총액·배당성향은 있는데 DPS가 빈 행은 다시
         col = lambda c: d[c] if c in d else pd.Series(float("nan"), index=d.index)
-        stale = (ver < PARSER) & col("dps_common").isna() & (col("cash_div_total").fillna(0) > 0)
+        paid = (col("cash_div_total").fillna(0) > 0) | (col("payout_ratio").fillna(0) > 0)
+        stale = (ver < PARSER) & col("dps_common").isna() & paid
         ok = (d["has_data"] & ~stale) | (~d["has_data"] & ((d["fetched"] >= deadline)
                                                             | (d["fetched"] > now - pd.Timedelta(days=14))))
         final = set(zip(d.loc[ok, "corp_code"], d.loc[ok, "bsns_year"].astype(int)))
@@ -191,9 +192,10 @@ def first_filed() -> pd.DataFrame:
     dart_dividend는 kind='사업보고서', period=결산일 'YYYY.MM'으로 붙인다:
         dv['period'] = dv['ts'].dt.tz_convert('Asia/Seoul').dt.strftime('%Y.%m')"""
     parts = [store.read(FILINGS_DS, "ALL"), parse_filings(store.read("dart_disclosures", "ALL"))]
-    f = pd.concat([p for p in parts if not p.empty], ignore_index=True)
-    if f.empty:
-        return f
+    parts = [p for p in parts if not p.empty]
+    if not parts:
+        return pd.DataFrame(columns=["corp_code", "kind", "period", "first_filed", "last_filed", "n_filings"])
+    f = pd.concat(parts, ignore_index=True)
     return (f.groupby(["corp_code", "kind", "period"], as_index=False)
             .agg(first_filed=("ts", "min"), last_filed=("ts", "max"), n_filings=("rcept_no", "nunique")))
 

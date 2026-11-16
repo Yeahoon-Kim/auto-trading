@@ -165,3 +165,18 @@ def test_schedule_rows_splits_at_100():
 
     rows = dv.schedule_rows(fetch, "172580", "20100101", "20251231")
     assert len(rows) == len(dates) and len({r["record_date"] for r in rows}) == len(dates)
+
+
+def test_todo_pairs_reparse_by_payout_only():
+    """배당총액이 비어도 배당성향이 있으면 1판 파서 행을 다시 받는다."""
+    codes = pd.DataFrame({"corp_code": ["A"], "symbol": ["1"]})
+    done = pd.DataFrame({"corp_code": ["A"], "bsns_year": [2016], "has_data": [True],
+                         "fetched": pd.to_datetime(["2026-11-16"], utc=True),
+                         "dps_common": [None], "cash_div_total": [None], "payout_ratio": [14.3]})
+    assert dv.todo_pairs(codes, range(2016, 2017), done, pd.Timestamp("2026-11-17", tz="UTC")) == [("A", "1", 2016)]
+
+
+def test_first_filed_empty(monkeypatch):
+    monkeypatch.setattr(dv.store, "read", lambda ds, sym: pd.DataFrame())
+    ff = dv.first_filed()
+    assert ff.empty and "first_filed" in ff.columns
