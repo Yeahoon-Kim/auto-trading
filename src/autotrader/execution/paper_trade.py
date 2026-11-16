@@ -26,17 +26,17 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
 from autotrader.core.schemas import Position
 from autotrader.execution import trade_desk as desk
-from autotrader.execution.paper import check_retirement
+from autotrader.execution.paper import NOISE, check_retirement, split_dividend
 from autotrader.risk import guards
 
 EPS = 1e-9
-NOISE = 1e-4            # 원본가·수정주가 수익 차이가 이 안이면 무시 (가장 작은 실제 배당도 0.1% 안팎)
-MIN_SPLIT_FACTOR = 0.7   # 원본가/수정주가 수익 비율이 이보다 작거나 1보다 크면 분할·병합, 그 사이(0.7~1)는 배당락
 sgn = desk.sgn
 
 
@@ -54,6 +54,8 @@ def trade_bars(panel) -> dict[str, pd.DataFrame]:
         out["tradable"] = out["present"].copy()
     out["adj_close"] = c
     out["ratio"] = ratio
+    if "_f" in panel:
+        out["factor"] = panel["_f"]      # kr_adj_factor (분할·병합만)
     return out
 
 
@@ -63,6 +65,9 @@ def _get(df: pd.DataFrame, i: int, s: str, default=np.nan):
 
 def _corporate_actions(book: desk.TradeBook, spec: desk.DeskSpec, raw: dict, i: int, prev_i: int | None,
                        ev: list) -> None:
+    """원본가·수정주가 수익 차이를 execution/paper.py split_dividend로 나눠 처리한다 (비중형 paper와 같은 규칙).
+    배당락: 세후 배당을 현금으로 (수량 그대로). 분할·병합(kr_adj_factor, 없으면 비율 범위): 수량 조정, 단주는 현금.
+    어느 쪽이든 진입가·손절가·목표가·지정가는 전체 비율로 옮긴다 — 백테스트가 수정주가로 정한 가격 수준 유지."""
     if prev_i is None:
         return
     for s in list(book.positions) + [pl["symbol"] for pl in book.pending]:
@@ -71,39 +76,43 @@ def _corporate_actions(book: desk.TradeBook, spec: desk.DeskSpec, raw: dict, i: 
         if not all(np.isfinite(x) and x > 0 for x in (rc, ac, rp, ap)):
             continue
         f = (rc / rp) / (ac / ap)
-        if abs(f - 1) <= NOISE:            # 수정주가 계산의 부동소수 오차 (예: 068270에서 ±4e-6)
+        split = None
+        if "factor" in raw:
+            fn, fp = _get(raw["factor"], i, s), _get(raw["factor"], prev_i, s)
+            if np.isfinite(fn) and np.isfinite(fp) and fn > 0 and fp > 0:
+                split = fp / fn
+        k, r = split_dividend(f, split)
+        if k == 1.0 and r == 1.0:
             continue
-        # 원본가가 수정주가보다 덜 오른 날: 배당락(현금, 수정주가는 세후 배당 재투자) 또는 분할·병합.
-        # 30% 넘게 벌어지면 분할·병합으로 보고 수량을 고치고, 그보다 작게 내려가면 배당으로 보고 현금을 넣는다.
-        # 어느 쪽이든 평가액은 백테스트(수정주가)와 같고, 손절가·목표가·지정가는 같은 비율로 옮긴다
-        # (백테스트에서 수정주가 기준으로 정한 가격 수준을 그대로 유지).
-        dividend = MIN_SPLIT_FACTOR < f < 1
+        cash = lieu = 0.0
         if s in book.positions:
             p = book.positions[s]
-            if dividend:
-                cash = sgn(p["side"]) * p["qty"] * spec.multiplier * rc * (1 / f - 1)
-                book.cash += cash
-                p["income"] = p.get("income", 0.0) + cash
-            else:
-                p["qty"] = p["qty"] / f
-        for p in [book.positions[s]] if s in book.positions else []:
-            for k in ("entry", "stop", "target"):
-                if p.get(k) is not None:
-                    p[k] = p[k] * f
+            if k != 1.0:
+                q = p["qty"] / k
+                qi = round(q) if abs(q - round(q)) < 1e-6 else math.floor(q / spec.lot + 1e-9) * spec.lot
+                lieu = sgn(p["side"]) * (q - qi) * spec.multiplier * rc
+                p["qty"] = qi
+            if r != 1.0:
+                cash = sgn(p["side"]) * p["qty"] * spec.multiplier * rc * (1 / r - 1)
+            book.cash += cash + lieu
+            p["income"] = p.get("income", 0.0) + cash + lieu
+            for key in ("entry", "stop", "target"):
+                if p.get(key) is not None:
+                    p[key] = p[key] * f
         for pl in [pl for pl in book.pending if pl["symbol"] == s]:
-            if not dividend:
-                pl["qty"] = pl["qty"] / f
-            for k in ("stop", "target", "limit"):
-                if pl.get(k) is not None:
-                    pl[k] = pl[k] * f
-        if dividend:
-            ev.append({"kind": "dividend", "symbol": s, "factor": f,
-                       "per_share_net": rc * (1 / f - 1), "cash": cash if s in book.positions else 0.0,
+            if k != 1.0:
+                pl["qty"] = math.floor(pl["qty"] / k / spec.lot + 1e-6) * spec.lot
+            for key in ("stop", "target", "limit"):
+                if pl.get(key) is not None:
+                    pl[key] = pl[key] * f
+        if k != 1.0:
+            ev.append({"kind": "corporate_action", "symbol": s, "factor": k, "cash_in_lieu": lieu,
+                       "reason": ("kr_adj_factor 분할·병합" if split is not None and abs(split - 1) > NOISE
+                                  else "원본가·수정주가 수익 차이 (수정계수 밖 병합·감자 보정 등)")
+                                 + " → 수량·진입가·손절가·목표가 조정 (실제 계좌 내역과 대조 필요)"})
+        if r != 1.0:
+            ev.append({"kind": "dividend", "symbol": s, "factor": r, "per_share_net": rc * (1 / r - 1), "cash": cash,
                        "reason": "배당락: 세후 배당을 현금으로 (수정주가 기준 손절가·목표가는 같은 비율로 이동)"})
-        else:
-            ev.append({"kind": "corporate_action", "symbol": s, "factor": f,
-                       "reason": "원본가·수정주가 수익 차이 → 분할·병합으로 보고 수량·진입가·손절가·목표가 조정 "
-                                 "(실제 계좌 내역과 대조 필요)"})
 
 
 def step(book: desk.TradeBook, panel, raw: dict, rows: list, i: int, fee: float, tax: float, risk: dict,

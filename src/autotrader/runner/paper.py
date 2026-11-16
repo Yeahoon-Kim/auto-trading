@@ -70,8 +70,10 @@ def options(cfg: dict) -> dict:
 
 def load_panel(cfg: dict, today=None):
     fields = list(cfg.get("fields") or [])
-    if cfg["market"] == "kr_stock" and "raw_close" not in fields:
-        fields.append("raw_close")      # 원본가 장부용
+    if cfg["market"] == "kr_stock":
+        # raw_close: 원본가 장부용. _f: kr_adj_factor (backtest/data.py가 행마다 남기는 열) — 분할·병합과 배당락을
+        # 구분하는 데 쓴다 (execution/paper.py split_dividend). data.py에서 이름이 바뀌면 비율 범위로 나누는 쪽으로 돈다.
+        fields += [f for f in ("raw_close", "_f") if f not in fields]
     if (cfg.get("type") or "portfolio") == "trade":
         fields += [f for f in ("high", "low") if f not in fields]   # 손절·목표가 판정
     panel = load(cfg["market"], cfg.get("universe") or None, start=cfg.get("data_start") or None,
