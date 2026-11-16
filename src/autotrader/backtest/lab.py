@@ -351,6 +351,11 @@ def report(s: dict) -> str:
              f"매도세 {_tax(s['costs']['tax_pct_sell'])}",
              f"- 데이터: {s['data'].get('source')}  ·  생존편향: {s['data'].get('survivorship')}",
              ]
+    if s.get("type") != "trade":
+        sz = (s.get("execution") or {}).get("sizing") or "next_open"
+        lines.append(f"- 체결·수량: {s.get('fill') or 'next_open'} 체결, 수량 sizing={sz} ("
+                     + ("신호 봉 종가로 수량을 정함 — paper 데스크와 같음, 시가·종가 차이만큼 비중이 어긋남"
+                        if sz == "prev_close" else "체결 가격으로 목표 비중을 정확히 맞춤") + ")")
     tr = s.get("trials") or {}
     if tr:
         lines.append(f"- 시도 횟수: {tr.get('count') if tr.get('count') is not None else '미기록'}"
