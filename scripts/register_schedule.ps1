@@ -4,6 +4,7 @@
 #   autotrader-brief   : 08:00 — 국면 지표 재계산 + 장 전 브리핑 텔레그램 전송
 #   autotrader-health  : 12:00, 20:00 — 수집 상태 점검, 문제 있을 때만 텔레그램 알림
 #   autotrader-ops     : 23:00 — 운영 마감 보고 (사실 표 + ops-reporter 요약) 텔레그램 전송
+#   autotrader-weekly  : 토요일 10:00 (미국 금요일 장 마감 후) — 주간 회의 자료 (reports/weekly/) 텔레그램 전송
 #
 #   PC가 꺼져 있어 놓친 실행은 켜진 직후 실행된다 (StartWhenAvailable).
 #   모든 소스가 과거분을 보관하고 있어서 며칠 꺼져 있어도 다음 실행 때 빈 구간을 채운다.
@@ -41,3 +42,7 @@ Register "autotrader-health" "run_module.ps1" "autotrader.data.cli health --noti
 Register "autotrader-ops" "run_module.ps1" "autotrader.monitoring.daily_report --notify" @(
     (New-ScheduledTaskTrigger -Daily -At "23:00")
 ) "auto-trading 운영 마감 보고"
+
+Register "autotrader-weekly" "run_module.ps1" "autotrader.monitoring.weekly_report --notify" @(
+    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At "10:00")
+) "auto-trading 주간 회의 자료"

@@ -178,8 +178,8 @@ def _labs() -> list[dict]:
     return out
 
 
-def _backlog() -> int | None:
-    """labs/BACKLOG.md '## 후보' 표의 데이터 행 수. 파일이 없으면 None."""
+def _backlog(section: str = "후보") -> int | None:
+    """labs/BACKLOG.md '## {section}' 표의 데이터 행 수. 파일이 없으면 None."""
     p = LABS_DIR / "BACKLOG.md"
     if not p.exists():
         return None
@@ -187,7 +187,7 @@ def _backlog() -> int | None:
     for line in p.read_text(encoding="utf-8").splitlines():
         t = line.strip()
         if t.startswith("## "):
-            in_sec, seen_head = t[3:].strip() == "후보", False
+            in_sec, seen_head = t[3:].strip() == section, False
             continue
         if not in_sec or not t.startswith("|"):
             continue
