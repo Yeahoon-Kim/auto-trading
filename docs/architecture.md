@@ -174,7 +174,7 @@ risk.yaml의 종목 수 한도(10)가 20종목 비중 전략을 잘라내는 문
 | 사이징 | 비중이 곧 사이징. 종목 수·비중은 전략이 정함 | `sizing.size()` — 값은 lab.yaml `trade` 블록 (기본값·상한은 risk.yaml `trade`) |
 | 청산 | 다음 리밸런싱 | 손절·목표가·장 마감 전 청산 (`guards.check_position`) |
 | 백테스트 | 공용 엔진 (`backtest/engine.py`) | 데스크 처리 코드를 과거 봉으로 재생 (`backtest/trade.py`, `generate_trades`) ✅ — 같은 봉 손절·목표가 동시 도달은 손절, 시가 갭은 시가 체결 |
-| paper·live | `execution/paper.py` 리밸런싱 경로 ✅ | Signal → `make_plan` → Order → Fill + 포지션 감시 — **2단계** |
+| paper·live | `execution/paper.py` 리밸런싱 경로 ✅ | paper ✅ `execution/paper_trade.py` (봉 처리 규칙은 `execution/trade_desk.py` — 백테스트 재생과 공용) · live 미구현 |
 
 한도는 두 층이다 (`config/risk.yaml`).
 - **계좌 보호 (모든 유형)**: kill_switch(사람이 켬) → 신규 매수 중단(매도는 허용) · 1회 주문 금액 · 분당 주문 수 ·
