@@ -158,7 +158,8 @@ def close(book: TradeBook, spec: DeskSpec, symbol: str, ts, price: float, kind: 
     notional = p["qty"] * m * price
     c = notional * fee + (notional * tax if p["side"] == "long" else 0.0)
     book.cash += sgn(p["side"]) * notional - c
-    pnl = sgn(p["side"]) * p["qty"] * m * (price - p["entry"]) - p["cost_in"] - c
+    # income: paper에서 보유 중 받은 배당 (현금으로 이미 들어옴). 백테스트는 수정주가에 들어 있어 0
+    pnl = sgn(p["side"]) * p["qty"] * m * (price - p["entry"]) - p["cost_in"] - c + p.get("income", 0.0)
     rec = {"symbol": symbol, "side": p["side"], "signal_ts": p["signal_ts"], "entry_ts": p["entry_ts"],
            "exit_ts": ts, "entry": p["entry"], "exit": price, "stop": p["stop"], "target": p["target"],
            "qty": p["qty"], "intraday": p["intraday"], "exit_kind": kind, "exit_reason": reason,

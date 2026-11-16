@@ -186,3 +186,26 @@ def test_retirement_alert_only():
                             retirement={"max_losing_days": 2})
     assert [e for e in ev if e["kind"] == "retirement"]
     assert "A" in book.positions                              # 매매는 그대로 (퇴출은 사람이 정함)
+
+
+def test_ex_dividend_credits_cash_keeps_qty_and_moves_stop():
+    # 수정주가는 평평(배당 재투자), 원본가는 셋째 봉 배당락에 102 → 100 (세후 배당 2.04원 = 100 × (1/f - 1))
+    p = _kr([FLAT] * 5, [1.02, 1.02, 1, 1, 1])
+    rows = [{"ts": p.index[0], "symbol": "A", "side": "long", "stop": 95.0, "target": 110.0}]
+    book, ev = replay_trade(p, _by_bar(p, bt.normalize(rows, p)), 0, engine.Costs(), RISK, _spec(), capital=CAP)
+    order = next(e for e in ev if e["kind"] == "order")
+    div = [e for e in ev if e["kind"] == "dividend"]
+    assert len(div) == 1 and not [e for e in ev if e["kind"] == "corporate_action"]
+    pos = book.positions["A"]
+    assert pos["qty"] == order["qty"]                          # 수량 그대로
+    assert div[0]["cash"] == pytest.approx(order["qty"] * 2.0)  # 원본가 하락분만큼 현금
+    assert pos["stop"] == pytest.approx(95.0)                  # 96.9 × (100/102): 손절이 배당락으로 걸리지 않음
+    assert book.equity == pytest.approx(CAP)                   # 평가액은 백테스트의 배당 재투자와 같음
+
+
+def test_float_noise_between_raw_and_adjusted_is_ignored():
+    p = _kr([FLAT] * 4, [1.0, 1.0, 1.000004, 1.0])     # 실데이터 068270에서 본 크기의 오차
+    rows = [{"ts": p.index[0], "symbol": "A", "side": "long", "stop": 95.0}]
+    book, ev = replay_trade(p, _by_bar(p, bt.normalize(rows, p)), 0, engine.Costs(), RISK, _spec(), capital=CAP)
+    assert not [e for e in ev if e["kind"] in ("dividend", "corporate_action")]
+    assert float(book.positions["A"]["qty"]).is_integer()
