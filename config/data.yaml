@@ -33,3 +33,7 @@ dividends:                     # `collect dividends` (collectors/dividends.py)
 kr_public:                     # `collect kr-public` (collectors/kr_public.py)
   dart_owner_max_calls: 8000   # 지배주주 순이익(dart_fin_owner, fnlttSinglAcntAll) 실행당 호출 상한. 연결 보고서 약 7.9만 건 백필 →
                                # 하루 2회 실행이면 약 5일. DART 하루 한도(약 2만)를 dart_disclosures·dart_fin·dart_dividend와 공유
+
+edgar:                         # `collect edgar` (collectors/edgar.py). SEC_USER_AGENT(환경변수 또는 .env) 필요
+  refresh_days: 30             # 10-K·10-Q 색인에 안 잡혀도 이 주기로 companyfacts를 다시 받는다
+  max_companies_per_run: 600   # 실행당 companyfacts 상한 (유니버스 약 520개라 첫 실행에 전부)

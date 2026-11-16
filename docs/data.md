@@ -61,6 +61,8 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 | `dart_dividend` (symbol=ALL) | 사업보고서 **배당에 관한 사항**: 주당 현금배당금(`dps_common`·`dps_pref`, 원, 중간·분기배당 포함 연간 합계), 현금배당수익률(%), 현금배당성향(%), 현금·주식배당 총액(백만원), 주당 주식배당, 순이익·EPS(연결 우선). 회사·사업연도당 1행, 배당 기록 없음은 `has_data=False`. `ts` = 결산일, `filed` = 접수일 | OpenDART `alotMatter` | 사업연도 2015~, `dart_fin`과 같은 종목(상장폐지 포함) | 매일 (실행당 8천 호출씩 백필 → 이후 새 사업보고서만) |
 | `kr_dividend_schedule` (symbol=ALL) | KR **배당 기준일·배당락일**: `ts` = 기준일, `ex_date` = 배당락일(KRX 거래일로 계산: 기준일 이하 마지막 거래일의 전 거래일), `dps`(주당 현금배당금, 원), `kind`(결산·중간·분기), `stock_kind`(보통·우선), `divi_rate`(액면 대비 %), 주식배당률, `pay_date`. 공시일 없음 → 배당락 가격 보정(총수익)용 | KIS 예탁원정보 배당일정 (`HHKDB669102C0`) | 2010년 이후 KRX 상장 종목(상장폐지 포함), 기준일 2010~ (1년 앞 발표분까지) | 매일 (상장 종목은 7일마다 재조회) |
 | `dart_periodic_filings` (symbol=ALL) | 2015~2023 정기보고서(사업·반기·분기) 목록, 정정 포함: `ts`(접수일), `rcept_no`, `kind`, `period`('YYYY.MM'), `correction`. 2024~는 `dart_disclosures`에 있다. `dividends.first_filed()`가 둘을 합쳐 최초 접수일을 준다 | OpenDART 공시 목록 (회사별) | `dart_fin`과 같은 종목 | 회사당 1회 |
+| `edgar_facts` (symbol=ALL) | 미국 **재무 사실(fact) 긴 표**: `field`(eps_diluted·eps_basic·net_income·revenue·operating_income·equity·shares_outstanding·shares_diluted_wavg), `tag`·`tag_rank`(같은 항목의 us-gaap 태그 우선순위), `unit`, `start`(기간 시작, 시점 항목은 NaT)·`end`, `val`, `accn`(접수번호), `fy`·`fp`, `form`(10-K·10-Q·10-K/A·8-K…), **`filed`(공시일)**, `frame`. `ts` = 기간 끝. 같은 기간 값이 다음 공시(비교 재무제표·정정)에 다시 나오면 공시마다 행이 따로 있다 | SEC EDGAR XBRL companyfacts (키 없음, **`SEC_USER_AGENT` 필요**) | us_1d 유니버스(S&P500+NASDAQ100 **현재 구성종목**), XBRL 2009~ (그 전 기간은 이후 공시의 비교 값만) | 매일 (SEC 일별 색인에서 10-K·10-Q(정정 포함)를 낸 회사 + 30일 지난 회사만 다시 받음) |
+| `edgar_companies` (symbol=ALL) | 종목 → CIK(SEC `company_tickers.json`), 회사명, 마지막 companyfacts 수집 시각(`ts`), 사실 수 | SEC | 같음 | 매일 |
 | `us_dividends` (symbol=ALL) | 미국 **현금·주식배당**: `ts` = 배당락일, `rate`(주당 금액, 원본·분할 미반영), `record_date`, `payable_date`, `special`, `foreign`, `cusip`. ETF·펀드 포함 | Alpaca corporate actions v1 (키 필요) | **시장 전체**(상장폐지 포함), 배당락 2016~ | 매일 (최근 150일 + 발표된 90일 앞까지 재수집) |
 | `us_dividend_announcements` (symbol=ALL) | 미국 배당 발표 기록: `ts` = Alpaca `declaration_date` (**실제 결의일이 아님**, 아래 한계 참고), `cash`, `ex_date`, `record_date`, `payable_date`, `sub_type` | Alpaca corporate action announcements v2 (키 필요) | 시장 전체(2020~21은 뮤추얼펀드 다수), 2020~ | 매일 (최근 30일 재수집) |
 | `news` (symbol=ALL) | 미국 주식·코인 뉴스 (Benzinga): `id`, `ts`(기사 작성 시각), `updated_at`, `symbols`(쉼표로 이은 티커, 코인은 `BTCUSD`), `headline`, `summary`, `source`, `url`. 본문 없음 | Alpaca News API 무료 플랜 (키 필요) | 2015-01~ | 매일 |
@@ -110,6 +112,16 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
     대신 백테스트 엔진(`backtest/data.py` `load("kr_stock")`)이 `kr_dividend_schedule`의 배당락일에 배당소득세 15.4%(`config/settings.yaml` `kr_stock.dividend_tax_pct`)를 뗀 배당을 재투자해 **총수익**으로 계산한다.
     세율은 `dividend_tax` 인자(lab.yaml `dividend_tax`)로 바꾸고, `reinvest_dividends=False`면 예전처럼 가격 수익만 계산한다. report에 "KR 배당 재투자 반영" 여부가 찍힌다.
     `store.read("kr_adj_factor")`로 직접 수정주가를 만들면 여전히 배당이 빠진다.
+- **US 재무 (`edgar_facts`)**:
+  - 설정: SEC는 User-Agent에 연락처를 요구한다. 환경변수 또는 `.env`에 `SEC_USER_AGENT="이름 이메일"`을 사용자가 넣는다. 없으면 수집기는 건너뛰고 상태에 `skipped`를 남긴다. 코드·로그에는 이 값을 쓰지 않는다.
+  - 시점: `filed` 다음 거래일부터 알 수 있다. 같은 (`field`, `start`, `end`)에 공시가 여러 개면
+    - 최초 공시값(first): `filed`가 가장 이른 행. 정정 전 원래 숫자가 남아 있으므로 미래참조가 없다.
+    - 최신값(last as-of): asof 이전 `filed` 중 가장 늦은 행. 10-K/A·재작성 값은 그 `filed`부터 반영된다.
+    - 즉 정정(10-K/A, 10-Q/A)과 다음 해 비교 재무제표의 재작성 값을 지우지 않고 모두 남겨 두고, 엔진이 시점 규칙으로 고른다 (KR `dart_fin`은 최신 값만 남는 것과 다르다).
+  - 기간: 10-Q에는 3개월 값과 연초 누계(YTD)가 같이 있다 (`start`로 구분). 4분기 보고서는 없으므로 4분기 = 10-K 연간 − 3분기 누계. 회계연도가 달력과 다른 회사가 많다 (AAPL 9월 말).
+  - 태그: 같은 항목도 회사·연도마다 태그가 다르다 (매출: Revenues → RevenueFromContractWithCustomer…). 기간마다 `tag_rank`가 가장 작은 행을 쓴다. `net_income`의 1순위 `NetIncomeLoss`는 지배주주 귀속 순이익이다.
+  - 주식수: `shares_outstanding`의 1순위 `dei:EntityCommonStockSharesOutstanding`은 표지 기준일(공시 직전) 값, `us-gaap:CommonStockSharesOutstanding`은 기간 말 값이다. 클래스가 여러 개인 회사(GOOG/GOOGL, BRK)는 클래스별로 나뉘거나 합계만 있을 수 있다. GOOG·GOOGL처럼 같은 CIK면 같은 사실이 두 종목에 다 들어간다.
+  - 범위: 현재 구성종목만이라 **생존편향**이 있다. us-gaap만 받으므로 IFRS로 내는 외국 회사(20-F/40-F 중 IFRS)는 비어 있다 (ASML은 US GAAP라 있음). 8-K로만 나온 사실은 30일 주기 재수집 때 들어온다.
 - **legacy 재무제표 (US)**: 회계기간 기준이라 공개일이 아니다. 분기 +45일, 연간 +90일 공개 지연 규칙을 적용해서 쓴다. 같은 기간 중복과 9개월 누적 행이 섞여 있다.
 - **legacy US 일봉**: 분할 반영 가격이고 상장폐지 종목이 없다 (생존편향).
 - **KR 분봉 유니버스**: 시총 상위 350개 + 실제 KOSPI200·KOSDAQ150 구성종목(2026-08 기준) 합집합, 420개.
