@@ -44,10 +44,18 @@ fields: []               # open·close 외에 필요한 것: high, low, volume, 
                          #       current_assets, current_liabilities, noncurrent_assets, noncurrent_liabilities, capital_stock, retained_earnings
                          #     손익 TTM(최근 4개 분기 3개월 값 합, 4분기 = 연간 − 3분기 누적): revenue_ttm, operating_income_ttm,
                          #       pretax_income_ttm, net_income_ttm. 4개 분기가 다 없거나 연결·별도가 섞이면 NaN
+                         #     지배주주: net_income_controlling_ttm (연결 지배기업 소유주 귀속, 별도만 내는 회사는 순이익, 못 찾으면 NaN)
+                         #     eps_ttm: 지배주주 순이익 TTM ÷ (보통주 + 우선주 상장주식수, 자사주 미차감), 그날 주식 기준 원.
+                         #       보통주 코드만 (우선주는 NaN). PER = raw_close / eps_ttm (수정주가 close와 나누지 않는다)
                          #     PBR·PER·ROE는 market_cap과 같이 받아 strategy.py에서 계산 (예시: valuation())
+                         #   재무(us_stock, edgar_facts, USD): equity, shares_outstanding, revenue_ttm, operating_income_ttm,
+                         #     net_income_ttm(= net_income_controlling_ttm, 1순위 태그가 지배주주 귀속). 공시일 다음 거래일부터
+                         #     4분기 = 연간 − 9개월 누계. 현재 구성종목만(생존편향). 분할 이력이 없어 EPS·시가총액은 없다
                          #     재무 필드도 엔진이 시점을 자동 검사한다. report에 원천 범위·결측률이 남는다
 fin_timing: first        # 재무 공개일: first = 최초 접수일 (배당과 같은 규칙, 정정 값이 최초 접수일부터 보이는 경미한 미래참조)
                          #             last  = 마지막 접수일 filed (보수적, 정정된 보고서는 정정일까지 안 보임)
+                         #   us_stock: first = 최초 공시값 (정정 전 원래 숫자, 미래참조 없음)
+                         #             last  = 그날까지 최신 공시값 (10-K/A 정정·재작성 값을 그 공시일부터 반영)
                          #   dart_fin은 정정 전 원래 값을 저장하지 않는다. 결과가 둘 사이에서 크게 다르면 validator에 알린다
 fill: next_open          # next_open (다음 봉 시가 체결) | next_close (다음 봉 종가)
 funding: true            # crypto_futures: 펀딩비 반영 (binance_um_funding). 봉 동안 든 포지션 × 그 봉에 정산된 비율 합,

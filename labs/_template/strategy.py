@@ -64,9 +64,13 @@ def valuation(data) -> dict[str, pd.DataFrame]:
     필요 없으면 지운다."""
     eq = data.equity.where(data.equity > 0)
     ni = data.net_income_ttm
-    return {"pbr": data.market_cap / eq,
-            "per": data.market_cap / ni.where(ni > 0),
-            "roe": ni / eq}
+    out = {"pbr": data.market_cap / eq,
+           "per": data.market_cap / ni.where(ni > 0),
+           "roe": ni / eq}
+    if "eps_ttm" in data:   # 지배주주 기준 PER (fields에 raw_close, eps_ttm). 우선주까지 포함한 회사 전체 이익 대비 주가
+        eps = data.eps_ttm
+        out["per_controlling"] = data.raw_close / eps.where(eps > 0)
+    return out
 
 
 # 선택: 학습 창 데이터로 파라미터를 고르는 경우에만 정의한다. 워크포워드가 창마다 호출한다.

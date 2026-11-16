@@ -191,4 +191,4 @@ def test_coverage_and_errors(tmp_store):
     with pytest.raises(ValueError):
         _load(fin_timing="bogus")
     with pytest.raises(ValueError, match="kr_stock"):
-        bdata.load("us_stock", ["AAPL"], fields=("equity",), lockbox=True)
+        bdata.load("us_stock", ["AAPL"], fields=("eps_ttm",), lockbox=True)   # US 주당 값은 없음
