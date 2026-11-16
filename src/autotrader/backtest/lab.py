@@ -462,14 +462,27 @@ def _fin_lines(d: dict) -> list[str]:
         return []
     v = d.get("fin_data") or {}
     out = [f"- 재무 필드 시점: {d['fin_fields']}"]
-    if v.get("rows"):
-        miss = ", ".join(f"{k} {x:.1%}" for k, x in (v.get("missing") or {}).items())
+    miss = ", ".join(f"{k} {x:.1%}" for k, x in (v.get("missing") or {}).items())
+    us = "amendments" in v or "note" in v
+    if not v.get("rows"):
+        out.append(f"- 실행 시점 재무 데이터 범위: **{'edgar_facts' if us else 'dart_fin'} 없음** (재무 필드 전부 비어 있음)")
+    elif us:
+        lack = v.get("symbols_without_facts") or []
+        out.append(f"- 실행 시점 재무 데이터 범위: edgar_facts {v['rows']:,}행·{v['symbols']:,}종목, 공시일 {v['first']}~{v['last']}, "
+                   f"정정 공시(…/A) 행 {v['amendments']:,}개"
+                   + (f", 사실 없는 종목 {len(lack)}개({', '.join(lack[:10])})" if lack else "")
+                   + f". 결측률(가격 있는 칸 기준): {miss}")
+    else:
         out.append(f"- 실행 시점 재무 데이터 범위: dart_fin {v['rows']:,}개 분기·{v['symbols']:,}종목, "
                    f"공개일 {v['first']}~{v['last']}, 최초 접수일 없어 filed로 잡은 행 {v['fallback']:,}개, "
-                   f"최초 접수 뒤 정정된 행 {v['corrected']:,}개, 원화 아닌 보고서 제외 {v['non_krw_skipped']:,}개. "
-                   f"결측률(가격 있는 칸 기준): {miss}")
-    else:
-        out.append("- 실행 시점 재무 데이터 범위: **dart_fin 없음** (재무 필드 전부 비어 있음)")
+                   f"최초 접수 뒤 정정된 행 {v['corrected']:,}개, 원화 아닌 보고서 제외 {v['non_krw_skipped']:,}개, "
+                   f"지배주주 순이익 없는 분기 {v.get('nic_missing', 0):,}개"
+                   + (f"(출처별 행 {v['nic_source']})" if v.get("nic_source") else "")
+                   + f". 결측률(가격 있는 칸 기준): {miss}")
+    if v.get("eps"):
+        out.append(f"- {v['eps']}")
+    if v.get("note"):
+        out.append(f"- 주의: {v['note']}")
     return out
 
 
