@@ -98,3 +98,52 @@ def test_run_end_to_end(monkeypatch):
     assert store.get_state(edgar.DS, "ALL")["backfill_done"]
     edgar.run(["AAPL", "BRK-B"])  # 다시 돌려도 중복 없음 (색인은 어제까지 확인한 상태라 새 대상 없음)
     assert len(store.read(edgar.DS, "ALL")) == 7
+
+
+def test_bulk_load_from_zip():
+    import io
+    import json
+    import zipfile
+
+    raw = io.BytesIO()
+    with zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("CIK0000320193.json", json.dumps(FACTS))
+        z.writestr("CIK0000000001.json", json.dumps({"cik": 1, "facts": {}}))  # 유니버스 밖 회사
+    body = raw.getvalue()
+
+    def handler(req):
+        assert req.url == httpx.URL(edgar.BULK_URL)
+        return httpx.Response(200, content=body, headers={"last-modified": "Mon, 16 Nov 2026 08:00:00 GMT"})
+
+    got = []
+    targets = pd.DataFrame({"cik": [320193, 999]}, index=["AAPL", "NOZIP"])
+    edgar.bulk_load(httpx.Client(transport=httpx.MockTransport(handler)), targets,
+                    lambda s, df, ts: got.append((s, len(df), ts)))
+    gen = pd.Timestamp("2026-11-16 08:00", tz="UTC")
+    assert got == [("AAPL", 7, gen), ("NOZIP", 0, gen)]  # zip 생성 시각을 수집 시각으로
+    assert not list(store.DATA_ROOT.glob("tmp*"))  # 임시 zip은 지운다
+
+
+def test_run_uses_bulk_for_many_new(monkeypatch):
+    monkeypatch.setenv("SEC_USER_AGENT", "test-agent test@example.com")
+    monkeypatch.setattr(edgar, "config", lambda: {"edgar": {"bulk_min_new": 2}})
+    api = []
+
+    def fake_get(client, url):
+        req = httpx.Request("GET", url)
+        if url.endswith("company_tickers.json"):
+            return httpx.Response(200, json={"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+                                             "1": {"cik_str": 1067983, "ticker": "BRK.B", "title": "Berkshire"}},
+                                  request=req)
+        api.append(url)
+        return httpx.Response(404, request=req)
+
+    def fake_bulk(client, targets, emit):
+        for s in targets.index:
+            emit(s, edgar.parse_facts(FACTS, s) if s == "AAPL" else pd.DataFrame(), pd.Timestamp.now(tz="UTC"))
+
+    monkeypatch.setattr(edgar, "_get", fake_get)
+    monkeypatch.setattr(edgar, "bulk_load", fake_bulk)
+    edgar.run(["AAPL", "BRK-B"])
+    assert api == [] and len(store.read(edgar.DS, "ALL")) == 7  # 새 종목은 회사별 API를 부르지 않는다
+    assert set(store.read(edgar.CO_DS, "ALL")["symbol"]) == {"AAPL", "BRK-B"}

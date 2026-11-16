@@ -8,6 +8,7 @@
       시점 규칙: filed 다음 거래일부터 알 수 있음. 같은 (field, start, end)에서 asof 이전 filed 중
           최초(first) 또는 최신(last)을 고른다. 태그가 여러 개인 항목은 tag_rank가 작은 것을 먼저 쓴다.
 - edgar_companies (symbol=ALL): 종목 → CIK, 회사명, 마지막 companyfacts 수집 시각(ts).
+- 첫 백필: 처음 받는 종목이 bulk_min_new(50) 이상이면 일괄 파일 companyfacts.zip 하나를 받아 해당 회사만 꺼내 적재한다.
 - 갱신: SEC 일별 공시 색인(daily-index form.YYYYMMDD.idx)에서 10-K·10-Q(정정 포함)를 낸 CIK만 다시 받는다.
       그 밖에도 refresh_days가 지난 회사는 다시 받는다 (8-K 등으로 사실이 추가되는 경우).
 - SEC 규정: 초당 10회 이하(여기선 5회), User-Agent에 연락처 필수. User-Agent는 환경변수 또는 .env의
@@ -18,9 +19,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import tempfile
 import time
+import zipfile
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import httpx
 import pandas as pd
@@ -46,6 +52,7 @@ FIELDS = {  # 항목: [(분류, 태그)] — 앞에 있을수록 tag_rank가 작
     "shares_diluted_wavg": [("us-gaap", "WeightedAverageNumberOfDilutedSharesOutstanding")],
 }
 FORMS = {"10-K", "10-K/A", "10-Q", "10-Q/A", "10-KT", "10-KT/A"}  # 색인에서 다시 받을 계기가 되는 공시
+BULK_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
 _limit = RateLimiter(5)
 
 
@@ -152,6 +159,27 @@ def _index_filers(client: httpx.Client, start: pd.Timestamp, end: pd.Timestamp) 
     return ciks, done
 
 
+def bulk_load(client: httpx.Client, targets: pd.DataFrame, emit) -> None:
+    """SEC 일괄 파일 companyfacts.zip(전 기업, 매일 밤 재생성, 약 1.4GB)을 데이터 루트 아래 임시 폴더에 받아
+    targets(index=symbol, cik 열)의 회사 파일만 꺼내 parse_facts → emit(symbol, df, 수집 시각).
+    수집 시각은 zip의 Last-Modified(생성 시각)로 남긴다 → 그 뒤 공시는 일별 색인·refresh_days로 API가 다시 받는다.
+    zip은 끝나면 지운다."""
+    with tempfile.TemporaryDirectory(dir=store.DATA_ROOT) as tmp:
+        path = Path(tmp) / "companyfacts.zip"
+        _limit.wait()
+        with client.stream("GET", BULK_URL, timeout=1800) as r:
+            r.raise_for_status()
+            lm = r.headers.get("last-modified")
+            gen = pd.Timestamp(parsedate_to_datetime(lm)).tz_convert("UTC") if lm else pd.Timestamp.now(tz="UTC")
+            with open(path, "wb") as f:
+                f.writelines(r.iter_bytes(1 << 20))
+        with zipfile.ZipFile(path) as z:
+            names = set(z.namelist())
+            for s, c in targets["cik"].items():
+                name = f"CIK{int(c):010d}.json"
+                emit(s, parse_facts(json.loads(z.read(name)), s) if name in names else pd.DataFrame(), gen)
+
+
 def run(symbols: list[str] | None = None) -> None:
     ua = user_agent()
     if not ua:
@@ -187,18 +215,33 @@ def run(symbols: list[str] | None = None) -> None:
 
         syms = todo(companies, fetched, filers, now, int(cfg.get("refresh_days", 30)))
         syms = syms[:int(cfg.get("max_companies_per_run", 600))]
-        buf, co, n, fail = [], [], 0, 0
+        buf, co, cnt, fail = [], [], [0], 0
         cik = companies.set_index("symbol")
 
-        def flush() -> int:
-            m = 0
+        def flush() -> None:
             if buf:
-                m = store.write(DS, "ALL", pd.concat(buf, ignore_index=True), key=KEY + ["field"])
+                cnt[0] += store.write(DS, "ALL", pd.concat(buf, ignore_index=True), key=KEY + ["field"])
             if co:
                 store.write(CO_DS, "ALL", pd.DataFrame(co), key=["symbol"])
             buf.clear()
             co.clear()
-            return m
+
+        def emit(s: str, df: pd.DataFrame, ts: pd.Timestamp) -> None:
+            if not df.empty:
+                buf.append(df)
+            co.append({"ts": ts, "symbol": s, "cik": int(cik.loc[s, "cik"]), "title": cik.loc[s, "title"],
+                       "n_facts": len(df)})
+            if len(co) >= 50:
+                flush()
+
+        # 처음 받는 종목이 많으면(첫 백필, 유니버스 대량 추가) 일괄 zip 하나로 적재
+        seen = set(fetched["symbol"]) if not fetched.empty else set()
+        new = [s for s in syms if s not in seen]
+        how = "API"
+        if len(new) >= int(cfg.get("bulk_min_new", 50)):
+            bulk_load(client, cik.loc[new], emit)
+            flush()
+            syms, how = [s for s in syms if s in seen], f"일괄 zip {len(new)}개사 + API"
 
         for s in syms:
             c = int(cik.loc[s, "cik"])
@@ -211,18 +254,14 @@ def run(symbols: list[str] | None = None) -> None:
                 continue
             else:
                 df = parse_facts(r.json(), s)
-            if not df.empty:
-                buf.append(df)
-            co.append({"ts": pd.Timestamp.now(tz="UTC"), "symbol": s, "cik": c, "title": cik.loc[s, "title"],
-                       "n_facts": len(df)})
-            if len(co) >= 50:
-                n += flush()
-        n += flush()
+            emit(s, df, pd.Timestamp.now(tz="UTC"))
+        flush()
+        n = cnt[0]
         done = set(store.read(CO_DS, "ALL").get("symbol", pd.Series(dtype=str)))
         left = len(set(companies.dropna(subset=["cik"])["symbol"]) - done)  # 아직 한 번도 못 받은 종목
         store.set_state(DS, "ALL", backfill_done=left == 0, status="ok" if not fail else "error",
                         error=f"companyfacts 실패 {fail}개" if fail else None)
-        logger.info(f"{DS} {len(syms)}개사 갱신(색인 대상 {len(filers)} CIK), {n:,}행, 미수집 {left}개, 실패 {fail}개")
+        logger.info(f"{DS} {how}: API {len(syms)}개사 갱신(색인 대상 {len(filers)} CIK), {n:,}행, 미수집 {left}개, 실패 {fail}개")
     except Exception as e:
         store.set_state(DS, "ALL", status="error", error=str(e)[:500])
         logger.error(f"{DS} 실패: {e}")
