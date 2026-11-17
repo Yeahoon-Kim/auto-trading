@@ -10,6 +10,7 @@
     uv run python -m autotrader.data.cli collect news        # Alpaca 뉴스 2015~ (키 필요)
     uv run python -m autotrader.data.cli collect dividends   # 배당: DART 사업보고서(KR), Alpaca(US)
     uv run python -m autotrader.data.cli collect edgar       # US 재무: SEC EDGAR companyfacts (SEC_USER_AGENT 필요)
+    uv run python -m autotrader.data.cli collect us-splits   # US 분할 이력 (Yahoo, 발표일은 Alpaca 2020~)
     uv run python -m autotrader.data.cli collect binance --symbols BTCUSDT ETHUSDT
     uv run python -m autotrader.data.cli status
 
@@ -32,7 +33,7 @@ def main() -> None:
     c = sub.add_parser("collect")
     c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
                                       "us-minute", "us-sip", "news", "macro", "legacy", "kr-public",
-                                      "dividends", "edgar"])
+                                      "dividends", "edgar", "us-splits"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
     h = sub.add_parser("health")
@@ -65,6 +66,7 @@ def main() -> None:
         news,
         upbit,
         us_alpaca,
+        us_splits,
         us_stock,
     )
     from .collectors.common import keep_awake
@@ -89,6 +91,8 @@ def main() -> None:
             kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
         elif src == "news":
             news.run(a.symbols)
+        elif src == "us-splits":
+            us_splits.run(a.symbols)
         elif src == "us-sip":
             us_alpaca.run(a.symbols)
         elif src.startswith("us"):

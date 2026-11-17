@@ -38,3 +38,35 @@ edgar:                         # `collect edgar` (collectors/edgar.py). SEC_USER
   refresh_days: 30             # 10-K·10-Q 색인에 안 잡혀도 이 주기로 companyfacts를 다시 받는다
   max_companies_per_run: 600   # 실행당 companyfacts 상한 (유니버스 약 520개라 첫 실행에 전부)
   bulk_min_new: 50             # 처음 받는 종목이 이만큼 이상이면 회사별 API 대신 일괄 파일 companyfacts.zip(약 1.4GB)으로 적재
+  # 지주사 재편·합병 존속 등으로 CIK가 바뀐 종목의 옛 CIK (1:1 주식 교환만). 옛 CIK 사실은 새 CIK 첫 공시 전분만 쓴다.
+  # 2026-11-17 SEC submissions로 회사명 확인. 주식 교환비가 1:1이 아닌 합병(LIN, DD, BKR, VTRS 등)은 넣지 않는다.
+  predecessors:
+    XOM: [34088]               # Exxon Mobil Corp → ExxonMobil Holdings (2026)
+    DIS: [1001039]             # 옛 Walt Disney Co (TWDC Enterprises 18) → 2019 Fox 인수 때 새 지주사
+    GOOGL: [1288776]           # Google Inc. → Alphabet (2015-10)
+    GOOG: [1288776]
+    BLK: [1364742]             # BlackRock (2024 GIP 인수 때 새 지주사)
+    AVGO: [1441634, 1649338]   # Avago → Broadcom Ltd (2016) → Broadcom Inc (2018)
+    CI: [701221]               # 옛 Cigna (2018 Express Scripts 인수 때 새 지주사)
+    ICE: [1174746]             # 2013 NYSE 인수 때 새 지주사
+    ETN: [31277]               # Eaton Corp → Eaton plc (2012)
+    MDT: [64670]               # Medtronic Inc → plc (2015)
+    APA: [6769]                # Apache Corp → APA Corp (2021)
+    STE: [815065]              # STERIS Corp → plc (2015)
+    TPL: [97517]               # Texas Pacific Land Trust → Corp (2021)
+    BG: [1144519]              # Bunge Ltd → Bunge Global (2023)
+    APO: [1411494]             # Apollo Global Management (2022 Athene 합병 때 새 지주사)
+    MRVL: [1058057]            # Marvell Technology Group Ltd → Inc (2021)
+  # 클래스별 표지 주식수(edgar_class_shares): 차원 없는 주식수 사실이 있는 10-K·10-Q 비율이 이보다 낮은 CIK만 공시별 xbrl.zip 수집
+  class_min_coverage: 0.5
+  class_force_ciks: [1067983]  # BRK: 2009~2011 차원 없는 표지 값이 A주 수뿐이라 비율과 관계없이 클래스별로
+  class_max_filings: 1500      # 실행당 xbrl.zip 상한 (공시당 약 0.5~1MB)
+
+us_shares:                     # 분할 보정 주식수·시가총액 도우미 (src/autotrader/data/shares.py)
+  max_age_days: 400            # 마지막 주식수 공시가 이보다 오래되면 NaN (10-K만 내는 회사도 1년 + 여유)
+  # 클래스별 주식수(edgar_class_shares) → 그 종목(상장 클래스) 주식으로 환산하는 비율. 키는 member 이름의 일부.
+  # 적은 클래스: 오늘 기준 단위라 분할 보정을 하지 않는다. 0이면 뺀다.
+  # 안 적은 클래스: 1, 그 종목 분할 보정 적용 (GOOGL A·B·C처럼 함께 분할되고 경제적 권리가 같은 경우).
+  class_ratio:
+    BRK-B: {CommonClassAMember: 1500}     # A주 1주 = B주 1,500주 (2010-01-21 B주 50:1 분할 이후)
+    V: {CommonClassB: 0, CommonClassC: 0}  # B·C주는 전환비가 시기마다 바뀌어 뺀다 → V 시총 약 5~20% 작게 잡힘

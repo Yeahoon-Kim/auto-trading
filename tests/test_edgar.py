@@ -63,8 +63,11 @@ def test_todo():
     comp = pd.DataFrame({"symbol": ["AAPL", "NVDA", "MSFT", "NEW", "NOCIK"],
                          "cik": pd.array([320193, 1045810, 789019, 1, None], dtype="Int64")})
     fetched = pd.DataFrame({"symbol": ["AAPL", "NVDA", "MSFT"],
-                            "ts": [now - pd.Timedelta(days=d) for d in (1, 2, 40)]})
+                            "ts": [now - pd.Timedelta(days=d) for d in (1, 2, 40)],
+                            "fields_v": edgar.FIELDS_VERSION})
     assert edgar.todo(comp, fetched, {320193}, now, 30) == ["NEW", "MSFT", "AAPL"]
+    # fields_v 없음(예전 버전으로 받음) → 전부 다시
+    assert edgar.todo(comp, fetched.drop(columns="fields_v"), set(), now, 30) == ["NEW", "MSFT", "NVDA", "AAPL"]
 
 
 def test_run_without_user_agent_skips(monkeypatch):
@@ -144,6 +147,7 @@ def test_run_uses_bulk_for_many_new(monkeypatch):
 
     monkeypatch.setattr(edgar, "_get", fake_get)
     monkeypatch.setattr(edgar, "bulk_load", fake_bulk)
+    monkeypatch.setattr(edgar, "collect_class_shares", lambda client, cfg: None)  # 클래스별 수집은 test_us_shares에서
     edgar.run(["AAPL", "BRK-B"])
     assert api == [] and len(store.read(edgar.DS, "ALL")) == 7  # 새 종목은 회사별 API를 부르지 않는다
     assert set(store.read(edgar.CO_DS, "ALL")["symbol"]) == {"AAPL", "BRK-B"}
