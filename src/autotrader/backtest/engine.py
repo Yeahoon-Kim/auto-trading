@@ -176,7 +176,7 @@ def xirr(flows: list[tuple[pd.Timestamp, float]]) -> float | None:
 
 def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_open",
         start=None, end=None, capital: float | None = None, flows: pd.Series | None = None,
-        whole_shares: bool = False, rebalance: str = "always") -> Result:
+        whole_shares: bool = False, rebalance: str = "always", sizing: str = "next_open") -> Result:
     """weights(봉 t 종가에 정한 목표)를 봉 t+1에 체결. [start, end) 구간의 수익만 남긴다.
     start 이전 신호는 start 봉의 체결에 쓰인다 (워크포워드 이음매에서 끊기지 않게).
 
@@ -193,11 +193,23 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
                               그 사이에는 매매하지 않는다. 신호 표가 모든 봉에 행을 가지면(매일 계산하는 전략)
                               목표가 바뀐 봉에만 맞춘다. 상장폐지는 그 종목만 청산하고 남은 돈은 다음 신호까지 현금.
                               그 사이에는 매매하지 않는다. 월 리밸런싱 전략용.
+    sizing       수량을 언제 정하나 (체결은 fill 그대로)
+                 "next_open" (기본): 체결 가격으로 목표 비중을 정확히 맞춘다 (체결 봉 시가 기준 수량).
+                 "prev_close": paper 데스크처럼 신호 봉 t 종가에 수량을 정한다.
+                              수량 = 목표 비중 × 봉 t 종가 자산(+ 그날 들어오는 적립금) ÷ 봉 t 종가.
+                              체결 봉에서 그 수량을 사고팔아, 시가가 종가와 달라 생기는 비중 어긋남이 그대로 남는다.
+                              종가가 없는 종목은 그날 매매하지 않는다 (데스크도 수량을 못 정함).
+                              정수 주식이면 그 수량을 수수료 감안해 내림하고 현금이 모자라면 큰 매수부터 줄인다
+                              (데스크와 같은 규칙). 소수점 모드에는 현금 검사가 없어 시가가 오르면 비중 합이 1을
+                              조금 넘을 수 있다.
     returns(시간가중)는 적립금 영향을 뺀 수익률이라 MDD·Sharpe는 그대로 의미가 있다."""
     if fill not in ("next_open", "next_close"):
         raise ValueError(f"fill: {fill}")
     if rebalance not in ("always", "on_change", "on_signal"):
         raise ValueError(f"rebalance: {rebalance}")
+    if sizing not in ("next_open", "prev_close"):
+        raise ValueError(f"sizing: {sizing}")
+    prev_sizing = sizing == "prev_close"
     money = capital is not None or flows is not None
     if whole_shares and not money:
         raise ValueError("whole_shares에는 capital이나 flows가 필요하다")
@@ -250,6 +262,7 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         return (h / (1 + pf) if abs(1 + pf) > EPS else h * 0), pf
 
     for t in range(max(lo, 1), hi):
+        V_close = V                 # 봉 t-1 종가 자산 (prev_close 사이징 기준)
         prev_c = np.where(np.isnan(c[t - 1]), last_px, c[t - 1])
         last_px = np.where(np.isnan(c[t - 1]), last_px, c[t - 1])
         target = W[t - 1].copy()
@@ -291,11 +304,18 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
                 fire = bool((np.abs(W[t - 1] - prev_target) > EPS).any()) or (sig_on[t - 1] and not dense)
                 changed = np.full(k, fire) | (last < t)          # 상장폐지 종목은 그것만 청산
             trade_ok = trade_ok & (changed | bool(f))
-        new = np.where(trade_ok, target, h)
+        if prev_sizing:
+            # 신호 봉 종가로 정한 목표 수량. 종가가 없으면 수량을 못 정하므로 매매하지 않는다 (상장폐지 청산은 예외)
+            sized = (np.isfinite(c[t - 1]) & (c[t - 1] > 0)) | (target == 0)
+            trade_ok = trade_ok & (sized | dead)
+            q_want = np.where(sized, target * (V_close + f) / np.where(sized & (c[t - 1] > 0), c[t - 1], 1.0), 0.0)
+            new = np.where(trade_ok, np.nan_to_num(q_want * px / V) if V > EPS else 0.0, h)
+        else:
+            new = np.where(trade_ok, target, h)
 
         if whole_shares and V > EPS:
             cur = np.round(h * V / np.where(px > 0, px, np.inf))       # 지금 보유 주식 수 (정수)
-            want = new * V / np.where(px > 0, px, np.inf)
+            want = q_want if prev_sizing else new * V / np.where(px > 0, px, np.inf)
             buy = want > cur
             n_new = np.where(buy, cur + np.floor((want - cur) * np.where(want > 0, 1 / (1 + fee), 1) + 1e-9),
                              np.where(want >= 0, np.floor(want + 1e-9), -np.floor(-want + 1e-9)))
@@ -350,7 +370,7 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         cost=pd.Series(cost_s, sl).iloc[first:], turnover=pd.Series(turn_s, sl).iloc[first:],
         weights=pd.DataFrame(held, sl, w.columns).iloc[first:],
         trades=trades, forced_exits=forced, costs=costs,
-        meta={"fill": fill, "rebalance": rebalance, "whole_shares": whole_shares})
+        meta={"fill": fill, "rebalance": rebalance, "whole_shares": whole_shares, "sizing": sizing})
     if has_f:
         res.funding = pd.Series(fund_s, sl).iloc[first:]
     if money:
@@ -406,7 +426,7 @@ def windows(index: pd.DatetimeIndex, start=None, train: str = "24M", test: str =
 def execution_kw(execution: dict | None, index: pd.DatetimeIndex, start=None, end=None) -> dict:
     """lab.yaml execution 블록 → run() 인자. monthly_contribution은 그 구간의 월초 적립금 표로 바꾼다."""
     e = dict(execution or {})
-    kw = {k: e[k] for k in ("capital", "whole_shares", "rebalance") if e.get(k) is not None}
+    kw = {k: e[k] for k in ("capital", "whole_shares", "rebalance", "sizing") if e.get(k) is not None}
     if e.get("monthly_contribution"):
         kw["flows"] = monthly(index, e["monthly_contribution"], start, end)
     return kw

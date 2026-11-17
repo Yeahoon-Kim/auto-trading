@@ -70,6 +70,10 @@ execution:               # 비워 두면 비중만 계산 (자본 1 기준, 소�
   monthly_contribution:  # 매월 첫 봉 적립금 (예: 1000000)
   whole_shares: false    # true면 정수 주식만 (capital이나 적립금 필요)
   rebalance: always      # always | on_change (바뀐 종목·적립금 때만, 비중 합이 1을 넘을 수 있음) | on_signal (신호를 낸 봉·목표가 바뀐 봉에 전 종목 맞춤, 월 리밸런싱용)
+  sizing: next_open      # 수량을 언제 정하나 (체결은 fill 그대로)
+                         #   next_open:  체결 가격으로 목표 비중을 정확히 맞춤 (기본, 지금까지의 결과)
+                         #   prev_close: paper 데스크처럼 신호 봉 종가로 수량 = 비중 × 자산 ÷ 종가. 시가·종가 차이만큼 비중이 어긋난 채로 체결
+                         #               (paper로 갈 lab이면 이쪽이 운용 결과에 더 가깝다. 정수 주식이면 현금 부족 시 매수 축소)
 
 data_snapshot: ""        # 사용한 데이터 스냅샷 ID (재현용)
 
