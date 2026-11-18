@@ -1,7 +1,7 @@
 id: L003
 name: chart-patterns
 version: 1
-status: draft            # A 단계(유효성 연구) 진행 중. 판정 대상 전략은 B 단계에서 별도 lab으로 만든다
+status: rejected         # 2026-11-18 사용자 확정 (validator 의견 rejected). B 단계로 넘어간 전략 없음
 category: classic
 type: trade              # B 단계 예정 형태 (진입·손절·목표가)
 market: kr_stock         # A 단계는 kr_stock + us_stock 둘 다 본다 (README 0절)
