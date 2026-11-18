@@ -1,7 +1,7 @@
 id: L012
 name: us-spy-ma-timing
 version: 1               # 잠금 구간을 본 뒤 전략을 고치면 +1 하고 다시 검증
-status: draft            # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
+status: backtesting            # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
 category: classic        # classic | intraday | algo | arbitrage | llm  (연구 분류)
 type: portfolio          # 실행 유형 (docs/architecture.md §10). 비우면 portfolio
                          #   portfolio: generate_signals()가 날짜×종목 목표 비중을 낸다. 비중이 곧 사이징 (종목 수·비중은 전략이 정함)
@@ -84,11 +84,11 @@ execution:               # 비워 두면 비중만 계산 (자본 1 기준, 소�
 data_snapshot: ""        # 사용한 데이터 스냅샷 ID (재현용)
 
 trials:                  # 시도 횟수 — 다중 검정 판단용. 통과 기준을 바꾸지 않고, 많을수록 validator가 더 엄격하게 본다
-  count: 0               # 이 아이디어 계열로 개발 구간 결과를 본 횟수. 파라미터만 바꾼 재실행, --quick 실행, 이전 version 실행도 모두 센다
+  count: 1               # 이 아이디어 계열로 개발 구간 결과를 본 횟수. 파라미터만 바꾼 재실행, --quick 실행, 이전 version 실행도 모두 센다
                          #   백테스트를 돌리기 전에 +1 하고 log에 한 줄 적은 뒤 커밋한다 (가설 커밋 검사와 같이)
   exposed_from: [L008]       # 이 아이디어가 이미 개발 구간을 본 lab의 판정·결과에서 나왔으면 그 lab ID (예: [L001]). 없으면 비움
                          #   그 경우 출처 lab의 시도 횟수도 이 계열의 시도로 본다
-  log: []                # 실행마다 한 줄: "YYYY-MM-DD v1: 바꾼 것" (예: "2026-11-16 v1: lookback 120→60")
+  log: ["2026-11-18 v1: 첫 실행 (전체, 민감도 포함)"]                # 실행마다 한 줄: "YYYY-MM-DD v1: 바꾼 것" (예: "2026-11-16 v1: lookback 120→60")
 
 walk_forward:
   start: "2011-01-01"      # 개발 구간 시작일 (시험 2013~)
