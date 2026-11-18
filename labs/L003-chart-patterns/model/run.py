@@ -8,8 +8,16 @@
     uv run python labs/L003-chart-patterns/model/run.py --allow-real
     # 확인 구간 1회 (사전등록 뒤 lead agent만. 탐색 구간 전체로 최종 모델 1개 학습 → 확인 구간 예측)
     uv run python labs/L003-chart-patterns/model/run.py --period confirm --model hgb --explore-ic 0.0xx --allow-confirm
+    # 라운드 3: H3b = 국면 특징 추가, H4 = 국면 특징 + 60봉 보유 (verifier 점검은 --null / --null --leak)
+    uv run python labs/L003-chart-patterns/model/run.py --null --regime-features
+    uv run python labs/L003-chart-patterns/model/run.py --null --regime-features --horizon 60
+    uv run python labs/L003-chart-patterns/model/run.py --regime-features [--horizon 60] --allow-real          # lead agent만
+    uv run python labs/L003-chart-patterns/model/run.py --period confirm --regime-features [--horizon 60] --model hgb --explore-ic 0.0xx --allow-confirm
 
 출력: labs/L003-chart-patterns/results/R2/<YYYYMMDD-HHMM>-<period>-<tag>/ report.md, summary.csv, folds.csv, predictions.parquet, run.json
+      (--regime-features 또는 --horizon 60이면 results/R3/)
+국면 특징은 신호일·시장으로 찾는 날짜 값(regime.features, 관측일 < 신호일)이라 --null 가짜 시장에서도 실제 값 그대로다
+(가짜 시장의 y는 섞였으므로 국면 특징의 예측력은 0이어야 한다 → 국면 특징의 헛발견을 본다).
 """
 
 from __future__ import annotations
@@ -28,7 +36,11 @@ sys.path.insert(0, str(HERE))
 import dataset as D  # noqa: E402
 import walkforward as W  # noqa: E402
 
+sys.path.insert(0, str(D.LAB))
+import regime as RG  # noqa: E402  (라운드 3 국면 표)
+
 OUT_ROOT = D.LAB / "results" / "R2"
+OUT_ROOT_R3 = D.LAB / "results" / "R3"
 
 
 def parse(argv=None):
@@ -47,6 +59,10 @@ def parse(argv=None):
     ap.add_argument("--explore-ic", type=float, help="confirm: 탐색 워크포워드 IC (통과 기준 '50% 이상' 비교용)")
     ap.add_argument("--allow-real", action="store_true", help="실제 시장·실제 목표값으로 탐색 성과 계산 (lead agent만)")
     ap.add_argument("--allow-confirm", action="store_true", help="확인 구간 1회 실행 (lead agent만)")
+    ap.add_argument("--regime-features", action="store_true",
+                    help="라운드 3 H3b·H4: 국면 특징 추가 (regime.FEATURES: 지수 추세·변동성 분위, VIX·기간구조, 장단기 금리차, NFCI, 원/달러·달러지수 20일 변화)")
+    ap.add_argument("--horizon", type=int, choices=(20, 60), default=20,
+                    help="목표값·비용·purge·블록 봉 수 (H4 = 60)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--rebuild", action="store_true", help="데이터셋 캐시 무시")
     ap.add_argument("--tag", default="")
@@ -64,6 +80,23 @@ def add_leak(df: pd.DataFrame, corr: float, seed: int = 99) -> pd.DataFrame:
     return df
 
 
+def add_regime_features(df: pd.DataFrame, ds_period: str) -> tuple[pd.DataFrame, dict]:
+    """신호일·시장별 국면 특징 (regime.features: 관측일 < 신호일). 탐색 실행은 국면 원천을 경계 전까지만 읽는다."""
+    from autotrader.backtest import data as bdata
+    end = D.H.BOUNDARY if ds_period == "explore" else bdata.dev_end()
+    tab = RG.table(end)
+    df = df.copy()
+    for c in RG.FEATURES:
+        df[c] = np.nan
+    for m in df["market"].unique():
+        mk = (df["market"] == m).to_numpy()
+        F = RG.features(tab, df.loc[mk, "date"].values, m)
+        for c in RG.FEATURES:
+            df.loc[mk, c] = F[c].to_numpy(float)
+    info = {"table_last": str(tab.index[-1].date()), "missing": df[RG.FEATURES].isna().mean().round(4).to_dict()}
+    return df, info
+
+
 def run(a) -> Path:
     t0 = time.time()
     real = not a.null and not a.leak
@@ -76,38 +109,45 @@ def run(a) -> Path:
             raise SystemExit("confirm은 사전등록한 --model 1개가 필요")
     ds_period = "explore" if a.period == "explore" else "both"
     timing = {}
+    hz = a.horizon
     df, info = D.build_dataset(ds_period, a.markets, a.null_seed if a.null else None, a.drift, a.workers,
-                               rebuild=a.rebuild)
+                               rebuild=a.rebuild, horizon=hz)
     timing["dataset"] = round(time.time() - t0, 1)
     features = list(D.NUM_FEATURES)
+    rg_info = None
+    if a.regime_features:
+        df, rg_info = add_regime_features(df, ds_period)
+        features += RG.FEATURES
     if a.leak:
         df = add_leak(df, a.leak_corr)
         features.append("leak")
-    tag = "-".join(x for x in [a.tag, "null" if a.null else "", f"drift{a.drift}" if a.null and a.drift != "remove" else "",
+    tag = "-".join(x for x in [a.tag, "rg" if a.regime_features else "", f"h{hz}" if hz != 20 else "",
+                               "null" if a.null else "", f"drift{a.drift}" if a.null and a.drift != "remove" else "",
                                "leak" if a.leak else "", a.model or ""] if x)
     stamp = time.strftime("%Y%m%d-%H%M")
-    out = Path(a.out) if a.out else OUT_ROOT / f"{stamp}-{a.period}{'-' + tag if tag else ''}"
+    root = OUT_ROOT_R3 if (a.regime_features or hz != 20) else OUT_ROOT
+    out = Path(a.out) if a.out else root / f"{stamp}-{a.period}{'-' + tag if tag else ''}"
     out.mkdir(parents=True, exist_ok=True)
     tw = time.time()
     if a.period == "explore":
-        preds, summ, folds, hp = W.walk_forward(df, a.models, tuple(range(a.seeds)), features, "explore")
+        preds, summ, folds, hp = W.walk_forward(df, a.models, tuple(range(a.seeds)), features, "explore", horizon=hz)
     else:
-        preds, summ, folds, hp = W.walk_forward(df, ("zero", a.model), (0,), features, "confirm")
+        preds, summ, folds, hp = W.walk_forward(df, ("zero", a.model), (0,), features, "confirm", horizon=hz)
         if a.explore_ic is not None:
             summ["c_ic_half"] = summ["ic"] >= 0.5 * a.explore_ic
             summ["passed_confirm"] = summ["passed"] & summ["c_ic_half"]
     timing["walkforward"] = round(time.time() - tw, 1)
     nf = W.noise_floor(summ)
     main_col = next((f"pred_{m}_s0" for m in ("hgb", "ridge") if f"pred_{m}_s0" in preds), None)
-    bd = W.breakdown(preds, main_col) if main_col else pd.DataFrame()
+    bd = W.breakdown(preds, main_col, hz) if main_col else pd.DataFrame()
     timing["total"] = round(time.time() - t0, 1)
     preds.to_parquet(out / "predictions.parquet", index=False)
     summ.to_csv(out / "summary.csv", index=False, encoding="utf-8-sig")
     folds.to_csv(out / "folds.csv", index=False, encoding="utf-8-sig")
     run_info = {"argv": sys.argv, "args": vars(a), "features": features, "dataset": info, "timing": timing,
-                "rows": len(df), "hyperparams": hp}
+                "rows": len(df), "hyperparams": hp, "horizon": hz, "regime": rg_info}
     (out / "run.json").write_text(json.dumps(run_info, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    (out / "report.md").write_text(report(a, df, summ, nf, folds, bd, features, timing, main_col), encoding="utf-8")
+    (out / "report.md").write_text(report(a, df, summ, nf, folds, bd, features, timing, main_col, rg_info), encoding="utf-8")
     print(f"출력: {out}  ({timing['total']}초)")
     print(summ[["model", "seed", "ic", "top_n", "top_exc", "top_net", "top_p_date", "top_p_blk", "passed"]].to_string(index=False))
     return out
@@ -121,20 +161,25 @@ def _p(x):
     return "" if pd.isna(x) else (f"{x:.2g}" if x < 0.001 else f"{x:.3f}")
 
 
-def report(a, df, summ, nf, folds, bd, features, timing, main_col) -> str:
+def report(a, df, summ, nf, folds, bd, features, timing, main_col, rg_info=None) -> str:
+    hz = a.horizon
     kind = "헛발견 검사(섞은 가짜 시장)" if a.null else "실제 시장"
     if a.leak:
         kind += f" + 검출력 시험(leak 특징, 목표 상관 {a.leak_corr})"
-    L = [f"# L003 R2 학습형 예측 — {a.period} ({kind})", "",
+    rnd = "R3 " + ("H4" if hz != 20 else "H3b") if (a.regime_features or hz != 20) else "R2"
+    L = [f"# L003 {rnd} 학습형 예측 — {a.period} ({kind}, {hz}봉{', 국면 특징' if a.regime_features else ''})", "",
          f"- 실행: `{' '.join(sys.argv)}`",
-         f"- 구간: 탐색 = 신호일·20봉 청산일 모두 < {D.H.BOUNDARY.date()}. "
+         f"- 구간: 탐색 = 신호일·20봉·{hz}봉 청산일 모두 < {D.H.BOUNDARY.date()}. "
          + ("확인 구간 데이터는 읽지 않았다." if a.period == "explore" else "확인 = 신호일 ≥ 경계 (1회)."),
          "- 비용: 포함 (study 하네스 Costs, 청산일 기준 KR 매도세). 생존편향: KR 없음, US 있음(현재 구성종목).",
          "- 미래참조: 특징은 신호 봉 t 종가까지 (model/dataset.py 머리말, 잘라내기 검사 results/R2/harness-check.md).",
          f"- 가짜 시장: {'study shuffle_stock(boot), seed ' + str(a.null_seed) + ', drift ' + a.drift if a.null else '없음'}",
          f"- 데이터셋 {len(df)}행. 특징 {len(features)}개 + 범주 {D.CAT_FEATURE}: {', '.join(features)}",
-         "- 목표값 y = 20봉 수익 − 같은 날·같은 시장·같은 봉 유니버스 평균 20봉 수익 (방향 부호 없음).",
-         "- 상위 20% = 예측 연도마다 예측 백분위 > 0.8. 비용 후 = 평균(y − 왕복 비용). p = 날짜 묶음 / 20봉 블록 부트스트랩.",
+         f"- 목표값 y = {hz}봉 수익 − 같은 날·같은 시장·같은 봉 유니버스 평균 {hz}봉 수익 (방향 부호 없음). "
+         f"학습 행 = {hz}봉 청산일 < 예측 시작 (purge {hz}봉), 비용 = {hz}봉 청산일 기준 왕복, 블록 = 일봉 {28 * hz // 20}일·주봉 {140 * hz // 20}일.",
+         (f"- 국면 특징: 신호일 t·시장별, 관측일 < t (NFCI는 관측 + {RG.NFCI_LAG_DAYS}일). 원천 마지막 날 {rg_info['table_last']}. "
+          f"결측률 {rg_info['missing']}. 가짜 시장에서도 실제 값." if rg_info else "- 국면 특징: 없음"),
+         f"- 상위 20% = 예측 연도마다 예측 백분위 > 0.8. 비용 후 = 평균(y − 왕복 비용). p = 날짜 묶음 / {hz}봉 블록 부트스트랩.",
          f"- 통과(탐색 verifier) = 상위 20% 표본 ≥ {W.MIN_TOP_N} ∧ 비용 후 > 0 ∧ 두 p < {W.ALPHA} ∧ IC > 0.", "",
          "## 데이터셋 크기", "", df.groupby(["market", "timeframe"]).size().rename("신호 수").reset_index().to_markdown(index=False), "",
          "## 모델·시드별 (예측 구간 전체)", "",

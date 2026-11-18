@@ -70,6 +70,59 @@ def test_fold_purge_and_gap():
         assert not (itr & val).any() and not (val & ~train).any()
 
 
+def synth_ds60(**kw):
+    """synth_ds에 60봉 열(exit60 = 일봉 84일·주봉 420일 뒤, cost60)을 더한다."""
+    df, feats = synth_ds(**kw)
+    wk = df["is_weekly"].to_numpy() > 0.5
+    df["exit60"] = df["date"].values + np.where(wk, np.timedelta64(420, "D"), np.timedelta64(84, "D"))
+    df["ret60"], df["cost60"] = df["y"], 0.004
+    return df, feats
+
+
+def test_fold_purge_horizon60():
+    """R3 H4: 60봉 목표값이면 학습 행의 60봉 청산일 < 예측 시작 (60봉 purge). 20봉 기준 mask로는 새는 행이 있어야 한다."""
+    df, _ = synth_ds60()
+    folds = W.fold_masks(df, horizon=60)
+    assert [f[0] for f in folds] == [str(y) for y in range(2013, 2017)]
+    for name, start, train, test in folds:
+        tr, te = df[train], df[test]
+        assert train.sum() > 0 and test.sum() > 0
+        assert tr["exit60"].max() < te["date"].min()
+        d_gap = (start - tr.loc[tr["is_weekly"] == 0, "date"].max()).days
+        w_gap = (start - tr.loc[tr["is_weekly"] == 1, "date"].max()).days
+        assert d_gap > 84 and w_gap > 420                     # 일봉 60거래일(84일)·주봉 60주 이상
+        itr, val = W.inner_masks(df, train, start, horizon=60)
+        assert df.loc[itr, "exit60"].max() < df.loc[val, "date"].min()
+        assert not (itr & val).any() and not (val & ~train).any()
+        # 대조: 20봉 mask를 60봉 목표값에 쓰면 목표값이 예측 구간으로 넘어오는 학습 행이 생긴다
+        tr20 = W.train_mask_before(df, start, 20)
+        assert (df.loc[tr20, "exit60"] >= start).any()
+    (_, _, ctr, cte), = W.fold_masks(df.assign(period=np.where(df["date"] >= "2015-01-01", 1, 0)).pipe(
+        lambda d: d.assign(period=np.where((d["period"] == 0) & (d["exit60"] >= H.BOUNDARY), -1, d["period"]))), mode="confirm", horizon=60)
+    assert df.loc[ctr, "exit60"].max() < H.BOUNDARY
+
+
+def test_block_key_horizon60():
+    d = pd.to_datetime(["2012-01-02", "2012-01-29", "2012-03-25", "2012-03-26"]).values
+    k20 = W.block_key(d, np.zeros(4))
+    k60 = W.block_key(d, np.zeros(4), 60)
+    assert len(np.unique(k20)) > len(np.unique(k60))
+    assert (np.diff(np.unique(W.block_key(pd.date_range("2012-01-01", periods=2000).values, np.zeros(2000), 60))) == 1).all()
+    day = pd.date_range("2012-01-01", periods=2000).values
+    assert np.bincount(pd.factorize(W.block_key(day, np.zeros(2000), 60))[0]).max() == 84
+    assert np.bincount(pd.factorize(W.block_key(day, np.ones(2000), 60))[0]).max() == 420
+
+
+def test_walkforward_horizon60_null_and_leak():
+    df, feats = synth_ds60(seed=5)
+    _, summ, _, hp = W.walk_forward(df, ("zero", "ridge"), (0,), feats, log=lambda *_: None, horizon=60)
+    assert not summ["passed"].any()
+    assert all(pd.Timestamp(h["train_last_exit"]) < pd.Timestamp(h["test_first_date"]) for h in hp)
+    df2, feats2 = synth_ds60(seed=6, leak_corr=0.3)
+    _, summ2, _, _ = W.walk_forward(df2, ("ridge",), (0,), feats2, log=lambda *_: None, horizon=60)
+    assert summ2["passed"].all() and (summ2["ic"] > 0.15).all()
+
+
 def test_fold_excludes_non_explore_rows():
     df, _ = synth_ds()
     df.loc[df["date"] > "2015-06-01", "period"] = -1
@@ -207,3 +260,19 @@ def test_build_market_target_is_xs_demeaned():
     # 잘라내기 검사 (합성)
     res = D.check_truncation("kr_stock", w, idx, df, n_events=60, n_cuts=2)
     assert res["ok"], res
+
+
+def test_build_market_horizon60():
+    """R3 H4: 60봉 목표값 = ret60 − 그날 횡단면 평균, 탐색 행은 60봉 청산일도 경계 전."""
+    w = _wide()
+    idx = w["close"].mean(1)
+    df, info = D.build_market("kr_stock", w, idx, (0,), workers=1, timeframes=("1d",), horizon=60)
+    assert {"exit60", "ret60", "cost60", "delist60"} <= set(df.columns) and "exit20" not in df.columns
+    assert np.isfinite(df["y"]).all() and len(df) > 50
+    g = (df["ret60"] - df["y"]).groupby(df["date"]).agg(lambda x: x.max() - x.min())
+    assert (g < 1e-12).all()
+    assert (df["exit60"] < H.BOUNDARY).all()
+    # 60봉 청산일 = 진입 뒤 60거래일째 (20봉보다 뒤)
+    d20, _ = D.build_market("kr_stock", w, idx, (0,), workers=1, timeframes=("1d",))
+    m = df.merge(d20[["sym", "date", "tool", "variant", "exit20"]], on=["sym", "date", "tool", "variant"])
+    assert len(m) and (m["exit60"] > m["exit20"]).all()

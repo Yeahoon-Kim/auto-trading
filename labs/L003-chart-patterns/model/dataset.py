@@ -32,7 +32,10 @@
   - 날짜 특징(mcap_rank, 지수)은 그날(또는 그 이전) 값만 쓴다.
   - `check_truncation`이 신호마다 데이터를 t에서 잘라 탐지·특징을 다시 만들어 같은지 확인한다.
 
-캐시: model/.cache/dataset_<period>_<null>_<dev_end>.parquet (git 제외)
+라운드 3 H4 (horizon 60): 목표값·비용·청산일을 60봉으로 바꾼다 (build_dataset(horizon=60)). ret60은 H.build_bars가 이미 만든다
+  (탐색 구간 행의 60봉 청산이 경계를 넘으면 NaN → 그 행은 뺀다). 열 이름이 exit60·ret60·cost60·delist60이 된다.
+
+캐시: model/.cache/dataset_<period>_<null>_<dev_end>.parquet (git 제외, horizon 60은 _h60 붙음)
 """
 
 from __future__ import annotations
@@ -253,7 +256,11 @@ def stock_values(val_w: pd.DataFrame | None, s: H.Stock) -> np.ndarray | None:
 
 # ───────────────────────── 조립 ─────────────────────────
 def build_market(market: str, wide: dict, idx: pd.Series | None, periods=(0,), null_seed: int | None = None,
-                 drift: str = "remove", workers: int = 6, tools=None, timeframes=TIMEFRAMES) -> tuple[pd.DataFrame, dict]:
+                 drift: str = "remove", workers: int = 6, tools=None, timeframes=TIMEFRAMES,
+                 horizon: int = H20) -> tuple[pd.DataFrame, dict]:
+    if horizon not in H.HORIZONS:
+        raise ValueError(f"horizon은 {H.HORIZONS} 중 하나")
+    hz = horizon
     t0 = time.time()
     tools = tuple(tools or P.TOOLS)
     costs = H.Costs(market)
@@ -277,13 +284,15 @@ def build_market(market: str, wide: dict, idx: pd.Series | None, periods=(0,), n
         bt = H.build_bars(market, tf, stocks, univ, panel_last, costs)
         ev, _, stat = H.attach_events(det[det["timeframe"] == tf], bt, periods)
         b = bt.df
-        okb = b["period"].isin(periods).to_numpy() & np.isfinite(b[f"ret{H20}"].to_numpy())
-        xs = b.loc[okb].groupby("date")[f"ret{H20}"].agg(["mean", "count"])
+        okb = b["period"].isin(periods).to_numpy() & np.isfinite(b[f"ret{hz}"].to_numpy())
+        xs = b.loc[okb].groupby("date")[f"ret{hz}"].agg(["mean", "count"])
         ev = ev.join(xs, on="date")
         stat["xs_too_small"] = int((ev["count"].fillna(0) < MIN_XS).sum())
         ev = ev[ev["count"] >= MIN_XS].copy()
         ev["xs_mean"], ev["xs_n"] = ev.pop("mean"), ev.pop("count").astype(int)
-        ev["y"] = ev[f"ret{H20}"] - ev["xs_mean"]
+        ev["y"] = ev[f"ret{hz}"] - ev["xs_mean"]
+        stat["no_target"] = int((~np.isfinite(ev["y"].to_numpy(float))).sum())   # horizon 60: 청산이 경계를 넘는 탐색 행
+        ev = ev[np.isfinite(ev["y"].to_numpy(float))].copy()
         feats = []
         for sym, g in ev.groupby("sym"):
             s = by_sym[sym]
@@ -307,28 +316,29 @@ def build_market(market: str, wide: dict, idx: pd.Series | None, periods=(0,), n
         info[f"{tf}_events"] = stat
         info["timing"][f"{tf}_build"] = round(time.time() - tb, 1)
         keep = ["market", "timeframe", "sym", "date", "k", "tool", "variant", "pattern_start", "height", "stop_level",
-                "period", f"exit{H20}", f"ret{H20}", f"cost{H20}", f"delist{H20}", "xs_mean", "xs_n", "y"] + FEATURES
+                "period", f"exit{hz}", f"ret{hz}", f"cost{hz}", f"delist{hz}", "xs_mean", "xs_n", "y"] + FEATURES
         parts.append(ev[keep].copy())
     df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
-    df = df.rename(columns={f"exit{H20}": "exit20", f"ret{H20}": "ret20", f"cost{H20}": "cost20", f"delist{H20}": "delist20"})
+    info["horizon"] = hz
     info["timing"]["total"] = round(time.time() - t0, 1)
     return df, info
 
 
 def build_dataset(period: str = "explore", markets=MARKETS, null_seed: int | None = None, drift: str = "remove",
-                  workers: int = 6, use_cache: bool = True, rebuild: bool = False, max_symbols: int | None = None
-                  ) -> tuple[pd.DataFrame, dict]:
+                  workers: int = 6, use_cache: bool = True, rebuild: bool = False, max_symbols: int | None = None,
+                  horizon: int = H20) -> tuple[pd.DataFrame, dict]:
     """실제 데이터(또는 그 섞은 가짜 시장)로 데이터셋. period: explore(탐색만) | both(confirm 경로용, 탐색+확인)."""
     from autotrader.backtest import data as bdata
     if period not in ("explore", "both"):
         raise ValueError("period는 explore | both")
     tag = "real" if null_seed is None else f"null{null_seed}-{drift}"
     ms = "-".join(m.split("_")[0] for m in markets) + (f"-max{max_symbols}" if max_symbols else "")
-    path = CACHE / f"dataset_v{DS_VERSION}_{period}_{tag}_{ms}_{bdata.dev_end().date()}.parquet"
+    hs = "" if horizon == H20 else f"_h{horizon}"     # 20봉은 라운드 2 캐시 이름 그대로
+    path = CACHE / f"dataset_v{DS_VERSION}_{period}_{tag}_{ms}{hs}_{bdata.dev_end().date()}.parquet"
     ipath = path.with_suffix(".json")
     if use_cache and not rebuild and path.exists():
         return pd.read_parquet(path), json.loads(ipath.read_text(encoding="utf-8"))
-    parts, info = [], {"period": period, "null_seed": null_seed, "drift": drift, "markets": {}}
+    parts, info = [], {"period": period, "null_seed": null_seed, "drift": drift, "horizon": horizon, "markets": {}}
     for m in markets:
         tl = time.time()
         wide = load_market(m, period, use_cache)
@@ -338,7 +348,7 @@ def build_dataset(period: str = "explore", markets=MARKETS, null_seed: int | Non
             wide = {k: v[cols] for k, v in wide.items()}
         idx = load_index(m, period)
         load_s = round(time.time() - tl, 1)
-        df, mi = build_market(m, wide, idx, PERIODS[period], null_seed, drift, workers)
+        df, mi = build_market(m, wide, idx, PERIODS[period], null_seed, drift, workers, horizon=horizon)
         mi["timing"]["load"] = load_s
         info["markets"][m] = mi
         parts.append(df)
@@ -430,12 +440,13 @@ def main(argv=None):
     ap.add_argument("--null-seed", type=int)
     ap.add_argument("--drift", choices=("remove", "keep"), default="remove")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--horizon", type=int, choices=(20, 60), default=20)
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--check-trunc", type=int, default=0, help="시장마다 잘라내기 검사 신호 수 (0 = 생략)")
     ap.add_argument("--out", help="검사 결과 JSON 경로")
     a = ap.parse_args(argv)
     t0 = time.time()
-    df, info = build_dataset(a.period, a.markets, a.null_seed, a.drift, a.workers, rebuild=a.rebuild)
+    df, info = build_dataset(a.period, a.markets, a.null_seed, a.drift, a.workers, rebuild=a.rebuild, horizon=a.horizon)
     t_build = round(time.time() - t0, 1)
     size = df.groupby(["market", "timeframe"]).size().rename("n").reset_index()
     by_tool = df.groupby(["market", "timeframe", "tool"]).size().unstack("tool").fillna(0).astype(int)

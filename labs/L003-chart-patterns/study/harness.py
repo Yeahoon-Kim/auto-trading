@@ -485,10 +485,13 @@ def _sample_xsec(ev: pd.DataFrame, bt: BarTable, seed: int, matched: bool) -> np
     psym = df["sym"].values[pidx]
     eday = ev["date"].values.astype("datetime64[D]").astype(np.int64)
     eq = np.nan_to_num(ev["quint"].values, nan=-9).astype(np.int64) if matched else np.zeros(len(ev), np.int64)
-    ekey = eday * 10 + eq
+    # 분위 없는 이벤트(eq = −9)는 키 −1로 따로 묶어 건너뛴다. (2026-11-18 R3 수정: 예전 eday*10 − 9는 전날 5분위 1의 키
+    # (eday−1)*10 + 1과 같아서, 같은 키 묶음의 첫 행이 분위 있는 이벤트면 분위 없는 이벤트가 '전날' 위약을 받았다.
+    # R3 H3a 위약 국면 대조에서 발견, study/tests/test_harness.py test_xsec_nan_quint_no_cross_day)
+    ekey = np.where(eq < 0, -1, eday * 10 + eq)
     esym = ev["sid"].values
     for key, rows in pd.Series(np.arange(len(ev))).groupby(ekey).indices.items():
-        if eq[rows[0]] < 0:
+        if key < 0:
             continue
         lo, hi = np.searchsorted(pkey, key), np.searchsorted(pkey, key, side="right")
         P = hi - lo
@@ -560,11 +563,13 @@ def holm(p: np.ndarray) -> np.ndarray:
 UNIT = ["tool", "variant", "direction", "market", "timeframe"]
 
 
-def unit_stats(ev: pd.DataFrame, boot_seed: int = 0) -> pd.DataFrame:
-    """검정 단위 × 구간별 요약. ev에는 d{h}_m (추세 맞춘 위약 대비), d{h}_s (단순 위약 대비), r{h}, cost{h} 열이 있다."""
+def unit_stats(ev: pd.DataFrame, boot_seed: int = 0, unit: list | None = None) -> pd.DataFrame:
+    """검정 단위 × 구간별 요약. ev에는 d{h}_m (추세 맞춘 위약 대비), d{h}_s (단순 위약 대비), r{h}, cost{h} 열이 있다.
+    unit: 검정 단위 열 (기본 UNIT. 라운드 3 H3a는 UNIT + ['regime'])."""
+    unit = list(unit or UNIT)
     rows = []
-    for key, g in ev.groupby(UNIT + ["period"], sort=True):
-        r = dict(zip(UNIT + ["period"], key))
+    for key, g in ev.groupby(unit + ["period"], sort=True):
+        r = dict(zip(unit + ["period"], key))
         use = g[np.isfinite(g[f"d{MAIN_H}_m"])]
         r["n_events"] = len(g)
         r["n"] = len(use)
@@ -586,14 +591,15 @@ def unit_stats(ev: pd.DataFrame, boot_seed: int = 0) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def judge(summary: pd.DataFrame) -> pd.DataFrame:
+def judge(summary: pd.DataFrame, unit: list | None = None) -> pd.DataFrame:
     """README 1절 A 통과 기준. Holm은 이번 실행의 모든 검정 단위(탐색 구간 20봉, 추세 맞춘 위약)."""
+    unit = list(unit or UNIT)
     s = summary.copy()
     ex = s[s["period"] == 0].copy()
     ex["p_holm"] = holm(ex["p_m"].values)
     ex["p_holm_blk"] = holm(ex["p_m_blk"].values)   # 참고: 20봉 블록 묶음 (더 보수적)
-    cf = s[s["period"] == 1].set_index(UNIT)
-    out = ex.set_index(UNIT)
+    cf = s[s["period"] == 1].set_index(unit)
+    out = ex.set_index(unit)
     out["c1_holm"] = out["p_holm"] < ALPHA
     out["c2_cost"] = out[f"exc{MAIN_H}_m_after_cost"] > 0          # = 초과수익 > 왕복 비용
     out["c4_n"] = out["n"] >= MIN_N

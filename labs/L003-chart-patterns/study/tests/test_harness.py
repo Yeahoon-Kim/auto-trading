@@ -154,6 +154,53 @@ def test_placebo_rules():
     assert (a != H.sample_placebos(ev, bt, blocked, seed=6, matched=True)).any()
 
 
+def test_xsec_nan_quint_no_cross_day():
+    """분위 없는 이벤트(eq=-9)의 키가 전날 분위 1 키와 겹쳐 '전날' 위약을 받던 문제 (2026-11-18 R3에서 발견).
+    xsec 위약은 언제나 이벤트와 같은 날짜여야 하고, 분위 없는 이벤트는 추세 맞춘 위약이 없어야 한다."""
+    w = _wide(60, kr=False, seed=3)
+    stocks = H.stocks_from_wide(w)
+    bt = H.build_bars("us_stock", "1d", stocks, None, w["close"].index[-1], H.Costs("us_stock"))
+    df = bt.df
+    days = np.sort(df.loc[np.isfinite(df["quint"]), "date"].unique())
+    gap1 = np.flatnonzero(np.diff(days.astype("datetime64[D]").astype(np.int64)) == 1)   # 달력으로 하루 차이
+    d0, d1 = days[gap1[50]], days[gap1[50] + 1]
+    # d0: 분위 1인 종목의 신호 / d1: 분위가 NaN인 행을 하나 만들어 그 종목 신호
+    a = df[(df["date"] == d0) & (df["quint"] == 1)].iloc[0]
+    b = df[df["date"] == d1].iloc[0]
+    df.loc[b.name, "quint"] = np.nan
+    ev = pd.DataFrame({"date": [d0, d1], "direction": 1, "tool": "t", "variant": "v",
+                       "sym": [bt.syms[int(a["sym"])], bt.syms[int(b["sym"])]]})
+    ev, blocked, _ = H.attach_events(ev, bt, (0, 1))
+    assert np.isnan(ev.loc[ev["date"] == d1, "quint"]).all()
+    for seed in range(5):
+        idx = H.sample_placebos(ev, bt, blocked, seed=seed, matched=True, pool="xsec")
+        for i in range(len(ev)):
+            p = idx[i][idx[i] >= 0]
+            assert (df["date"].values[p] == ev["date"].values[i]).all()
+        assert (idx[(ev["date"] == d1).to_numpy()] < 0).all()
+
+
+def test_unit_stats_by_regime_holm_over_all():
+    """R3 H3a: 검정 단위 = 기존 단위 × 국면, Holm은 (단위 × 국면) 전체에 한 번."""
+    rng = np.random.default_rng(0)
+    n = 6000
+    ev = pd.DataFrame({"tool": rng.choice(["a", "b"], n), "variant": "v", "direction": 1, "market": "us_stock",
+                       "timeframe": "1d", "regime": rng.choice(["상승", "하락", "혼조"], n), "period": 0,
+                       "cl": rng.integers(0, 800, n), "blk": rng.integers(0, 40, n), "delist20": False})
+    for h in H.HORIZONS:
+        for k in ("m", "s"):
+            ev[f"d{h}_{k}"] = rng.normal(0, 0.05, n)
+        ev[f"r{h}"], ev[f"cost{h}"] = rng.normal(0, 0.05, n), 0.006
+    ev.loc[(ev["tool"] == "a") & (ev["regime"] == "상승"), "d20_m"] += 0.03     # 한 국면에만 심은 효과
+    unit = H.UNIT + ["regime"]
+    s = H.unit_stats(ev, 0, unit=unit)
+    v = H.judge(s, unit=unit)
+    assert len(v) == 6
+    assert np.allclose(v["p_holm"].to_numpy(), H.holm(v["p_m"].to_numpy()), equal_nan=True)
+    hit = v[(v["tool"] == "a") & (v["regime"] == "상승")].iloc[0]
+    assert hit["p_holm"] < 0.05 and (v.drop(hit.name)["p_holm"] > 0.05).all()
+
+
 def test_shuffle_preserves_daily_tuples():
     w = _wide(3, kr=False)
     s = H.stocks_from_wide(w)[1]

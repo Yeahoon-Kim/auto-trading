@@ -21,6 +21,9 @@
   - p: 날짜 묶음(같은 달력 날짜) / 20봉 블록(일봉 28일, 주봉 140일 달력 구간) 부트스트랩 (H.cluster_bootstrap, 양측 정규 p).
   - 통과(탐색 verifier용): 상위 20% 표본 ≥ 100 ∧ 비용 후 > 0 ∧ 두 p < 0.05 ∧ IC > 0.
     확인 구간 통과는 여기에 'IC ≥ 탐색 워크포워드 IC의 50%'가 더해진다 (README 3절).
+
+라운드 3 H4 (horizon h = 60): 모든 함수가 horizon 인자를 받는다 (기본 20 = 라운드 2 그대로).
+  학습 행 = exit{h} < 예측 시작 (60봉 purge), 비용 = cost{h}, 블록 = 일봉 28·h/20일, 주봉 140·h/20일 (60봉 → 84일·420일).
 """
 
 from __future__ import annotations
@@ -54,12 +57,12 @@ HGB_GRID = [{"max_leaf_nodes": 7, "min_samples_leaf": 500},
 
 
 # ───────────────────────── 창 ─────────────────────────
-def train_mask_before(df: pd.DataFrame, start) -> np.ndarray:
-    """목표값이 start 전에 다 정해진 행 (청산일 < start)."""
-    return (df["exit20"].values < np.datetime64(pd.Timestamp(start))) & (df["period"].values == 0)
+def train_mask_before(df: pd.DataFrame, start, horizon: int = 20) -> np.ndarray:
+    """목표값이 start 전에 다 정해진 행 (h봉 청산일 < start)."""
+    return (df[f"exit{horizon}"].values < np.datetime64(pd.Timestamp(start))) & (df["period"].values == 0)
 
 
-def fold_masks(df: pd.DataFrame, first_year: int = FIRST_TEST_YEAR, mode: str = "explore"):
+def fold_masks(df: pd.DataFrame, first_year: int = FIRST_TEST_YEAR, mode: str = "explore", horizon: int = 20):
     """(이름, 예측 시작, 학습 mask, 예측 mask) 목록."""
     out = []
     if mode == "explore":
@@ -68,21 +71,21 @@ def fold_masks(df: pd.DataFrame, first_year: int = FIRST_TEST_YEAR, mode: str = 
         for Y in range(first_year, int(yr[ex].max()) + 1):
             start = pd.Timestamp(f"{Y}-01-01")
             test = ex & (yr == Y)
-            train = train_mask_before(df, start)
+            train = train_mask_before(df, start, horizon)
             if test.sum() and train.sum():
                 out.append((str(Y), start, train, test))
     elif mode == "confirm":
-        out.append(("confirm", H.BOUNDARY, train_mask_before(df, H.BOUNDARY), df["period"].values == 1))
+        out.append(("confirm", H.BOUNDARY, train_mask_before(df, H.BOUNDARY, horizon), df["period"].values == 1))
     else:
         raise ValueError(mode)
     return out
 
 
-def inner_masks(df: pd.DataFrame, train: np.ndarray, start) -> tuple[np.ndarray, np.ndarray]:
+def inner_masks(df: pd.DataFrame, train: np.ndarray, start, horizon: int = 20) -> tuple[np.ndarray, np.ndarray]:
     """학습 창 안의 내부 검증: 예측 시작 직전 VAL_DAYS일의 신호 / 내부 학습: 청산일이 그 전인 신호."""
     vs = pd.Timestamp(start) - pd.Timedelta(days=VAL_DAYS)
     val = train & (df["date"].values >= np.datetime64(vs))
-    itr = train & (df["exit20"].values < np.datetime64(vs))
+    itr = train & (df[f"exit{horizon}"].values < np.datetime64(vs))
     return itr, val
 
 
@@ -184,16 +187,17 @@ def date_ic(date: np.ndarray, pred: np.ndarray, y: np.ndarray, min_n: int = MIN_
     return out.dropna(subset=["ic"]).reset_index(drop=True)
 
 
-def block_key(date: np.ndarray, weekly: np.ndarray) -> np.ndarray:
-    """20봉 블록: 일봉 = 28일 달력 구간, 주봉 = 140일 달력 구간 (시장은 합친다)."""
+def block_key(date: np.ndarray, weekly: np.ndarray, horizon: int = 20) -> np.ndarray:
+    """h봉 블록: 일봉 = 28·h/20일 달력 구간, 주봉 = 140·h/20일 달력 구간 (시장은 합친다). 20봉 → 28·140일, 60봉 → 84·420일."""
     day = np.asarray(date, dtype="datetime64[D]").astype(np.int64)
-    return np.where(np.asarray(weekly) > 0.5, 10_000_000 + day // 140, day // 28)
+    bd, bw = 28 * horizon // 20, 140 * horizon // 20
+    return np.where(np.asarray(weekly) > 0.5, 10_000_000 + day // bw, day // bd)
 
 
-def evaluate(te: pd.DataFrame, pred: np.ndarray, fold: np.ndarray, seed: int = 0) -> dict:
-    """te: 예측 구간 행(y, cost20, date, is_weekly). fold: 행마다 fold 이름 (상위 20% 기준을 fold 안에서 정한다)."""
+def evaluate(te: pd.DataFrame, pred: np.ndarray, fold: np.ndarray, seed: int = 0, horizon: int = 20) -> dict:
+    """te: 예측 구간 행(y, cost{h}, date, is_weekly). fold: 행마다 fold 이름 (상위 20% 기준을 fold 안에서 정한다)."""
     y = te["y"].to_numpy(float)
-    cost = te["cost20"].to_numpy(float)
+    cost = te[f"cost{horizon}"].to_numpy(float)
     date = te["date"].values
     wk = te["is_weekly"].to_numpy(float)
     r = {"n_test": len(te)}
@@ -210,7 +214,7 @@ def evaluate(te: pd.DataFrame, pred: np.ndarray, fold: np.ndarray, seed: int = 0
             icd = ic["date"].values
             icw = np.zeros(len(ic))   # IC 날짜는 시장·봉을 합친 날이라 일봉 블록(28일)으로 묶는다
             r["ic_p_date"] = H.cluster_bootstrap(ic["ic"].to_numpy(float), icd.astype("datetime64[D]").astype(np.int64), seed, N_BOOT)["p"]
-            r["ic_p_blk"] = H.cluster_bootstrap(ic["ic"].to_numpy(float), block_key(icd, icw), seed, N_BOOT)["p"]
+            r["ic_p_blk"] = H.cluster_bootstrap(ic["ic"].to_numpy(float), block_key(icd, icw, horizon), seed, N_BOOT)["p"]
         else:
             r["ic_p_date"] = r["ic_p_blk"] = np.nan
     d = y[top] - cost[top]
@@ -221,7 +225,7 @@ def evaluate(te: pd.DataFrame, pred: np.ndarray, fold: np.ndarray, seed: int = 0
     if top.sum() > 2:
         dc = np.asarray(date[top], dtype="datetime64[D]").astype(np.int64)
         r["top_p_date"] = H.cluster_bootstrap(d, dc, seed, N_BOOT)["p"]
-        r["top_p_blk"] = H.cluster_bootstrap(d, block_key(date[top], wk[top]), seed, N_BOOT)["p"]
+        r["top_p_blk"] = H.cluster_bootstrap(d, block_key(date[top], wk[top], horizon), seed, N_BOOT)["p"]
     else:
         r["top_p_date"] = r["top_p_blk"] = np.nan
     r["all_exc"] = float(np.mean(y))
@@ -232,11 +236,11 @@ def evaluate(te: pd.DataFrame, pred: np.ndarray, fold: np.ndarray, seed: int = 0
 
 
 # ───────────────────────── 실행 ─────────────────────────
-def select_hp(kind, df, train, start, features, cats, seed):
+def select_hp(kind, df, train, start, features, cats, seed, horizon: int = 20):
     grid = GRIDS[kind]
     if len(grid) == 1:
         return grid[0], []
-    itr, val = inner_masks(df, train, start)
+    itr, val = inner_masks(df, train, start, horizon)
     if itr.sum() < 500 or val.sum() < 100:
         return grid[0], [{"note": f"내부 검증 표본 부족 (학습 {int(itr.sum())}, 검증 {int(val.sum())}) → 첫 값"}]
     tr, va = df[itr], df[val]
@@ -250,12 +254,13 @@ def select_hp(kind, df, train, start, features, cats, seed):
 
 
 def walk_forward(df: pd.DataFrame, models=("zero", "ridge", "hgb"), seeds=(0, 1, 2, 3, 4), features=None,
-                 mode: str = "explore", first_year: int = FIRST_TEST_YEAR, log=print):
+                 mode: str = "explore", first_year: int = FIRST_TEST_YEAR, log=print, horizon: int = 20):
     """반환: (예측 DataFrame, 요약 DataFrame, fold별 DataFrame, 하이퍼파라미터 기록)."""
     features = list(features or D.NUM_FEATURES)
+    hz = horizon
     df = df.sort_values(["date", "market", "timeframe", "sym", "tool", "variant"]).reset_index(drop=True)
     cats = sorted(df[D.CAT_FEATURE].unique())
-    folds = fold_masks(df, first_year, mode)
+    folds = fold_masks(df, first_year, mode, hz)
     pred_cols, hp_log, fold_rows = {}, [], []
     test_any = np.zeros(len(df), bool)
     fold_of = np.full(len(df), "", dtype=object)
@@ -267,25 +272,25 @@ def walk_forward(df: pd.DataFrame, models=("zero", "ridge", "hgb"), seeds=(0, 1,
             t0 = time.time()
             pred = np.full(len(df), np.nan)
             for name, start, train, test in folds:
-                hp, tried = select_hp(kind, df, train, start, features, cats, seed)
+                hp, tried = select_hp(kind, df, train, start, features, cats, seed, hz)
                 tr, te = df[train], df[test]
                 pred[test] = fit_predict(kind, hp, tr, te, features, cats, seed)
                 hp_log.append({"model": kind, "seed": seed, "fold": name, "n_train": int(train.sum()),
-                               "n_test": int(test.sum()), "train_last_exit": str(df.loc[train, "exit20"].max()),
+                               "n_test": int(test.sum()), "train_last_exit": str(df.loc[train, f"exit{hz}"].max()),
                                "test_first_date": str(df.loc[test, "date"].min()), "chosen": hp, "tried": tried})
-                fr = evaluate(te, pred[test], np.full(test.sum(), name), seed)
+                fr = evaluate(te, pred[test], np.full(test.sum(), name), seed, hz)
                 fold_rows.append({"model": kind, "seed": seed, "fold": name, **fr})
             pred_cols[(kind, seed)] = pred
             log(f"  {kind} seed {seed}: {time.time() - t0:.1f}초")
     te = df[test_any]
     rows = []
     for (kind, seed), pred in pred_cols.items():
-        r = evaluate(te, pred[test_any], fold_of[test_any], seed)
+        r = evaluate(te, pred[test_any], fold_of[test_any], seed, hz)
         rows.append({"model": kind, "seed": seed, **r})
     summ = pd.DataFrame(rows)
     # 결정적 모델(zero·ridge)은 시드 1개만 돌린다 → 다른 시드 행은 같은 값 (noise floor 0)
-    preds = df.loc[test_any, ["market", "timeframe", "sym", "date", "tool", "variant", "direction", "y", "cost20",
-                              "ret20", "exit20", "is_weekly"]].copy()
+    preds = df.loc[test_any, ["market", "timeframe", "sym", "date", "tool", "variant", "direction", "y", f"cost{hz}",
+                              f"ret{hz}", f"exit{hz}", "is_weekly"]].copy()
     preds["fold"] = fold_of[test_any]
     for (kind, seed), pred in pred_cols.items():
         preds[f"pred_{kind}_s{seed}"] = pred[test_any]
@@ -299,10 +304,10 @@ def noise_floor(summ: pd.DataFrame) -> pd.DataFrame:
                          "passed": g["passed"].sum()}).reset_index()
 
 
-def breakdown(preds: pd.DataFrame, col: str) -> pd.DataFrame:
+def breakdown(preds: pd.DataFrame, col: str, horizon: int = 20) -> pd.DataFrame:
     """시장·봉별 참고 지표 (seed 0)."""
     rows = []
     for (m, tf), g in preds.groupby(["market", "timeframe"]):
-        r = evaluate(g, g[col].to_numpy(float), g["fold"].values)
+        r = evaluate(g, g[col].to_numpy(float), g["fold"].values, horizon=horizon)
         rows.append({"market": m, "timeframe": tf, **{k: r[k] for k in ("n_test", "ic", "ic_dates", "top_n", "top_exc", "top_net", "top_p_date", "top_p_blk")}})
     return pd.DataFrame(rows)
