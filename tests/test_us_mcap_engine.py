@@ -149,3 +149,13 @@ def test_template_top_by_mcap_dedups_cik(tmp_store):
     top2 = mod.top_by_mcap(p, n=2, prefer=pref)
     assert top2.loc[d, "GOOGL"] and not top2.loc[d, "GOOG"]
     assert not top.loc["2020-04-01"].any()   # 시총이 아직 없으면 아무것도 안 뽑음
+
+
+def test_same_day_filings_pick_latest_asof(tmp_store):
+    """같은 날 10-Q와 옛 기준일 8-K가 같이 공시되면 기준일이 최근인 값 하나 (입력 크기와 무관하게 같은 결과, KO 2016)."""
+    _write()
+    old = dict(_fact("AAA", 1, DEI, "2020-10-20", "2021-02-01", 4.1e8), accn="AAA-2021-02-01-8K", form="8-K")
+    store.write("edgar_facts", "ALL", pd.DataFrame([old]), key=["symbol", "tag", "unit", "start", "end", "accn", "field"])
+    p = _load()
+    assert p.market_cap["AAA"].loc["2021-02-02"] == pytest.approx(4.2e10)
+    assert bdata.check_mcap_causality(p, n_cuts=12)["passed"]

@@ -1098,7 +1098,14 @@ def us_mcap_fields(basis: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     b = basis[["date", "symbol", "ts"]].assign(close=basis["_rc"].to_numpy())
     if events is None or events.empty:
         return b[["date", "symbol"]].assign(shares=np.nan, market_cap=np.nan, cik=np.nan)
-    d = sh.daily_shares(events=events, bars=b[["ts", "symbol", "close"]])
+    # 같은 날 공시가 둘 이상이면(10-Q와 옛 기준일 8-K 등) 기준일(asof)이 가장 최근인 것 하나만.
+    # 그대로 두면 merge_asof가 정렬 순서에 따라 아무거나 골라 결과가 입력 크기에 따라 달라진다 (KO 2016-10-27)
+    ev = events[events["flag"] != "dropped"]
+    fday = _local_date(pd.to_datetime(ev["filed"], utc=True), TZ["us_stock"])
+    ev = ev.assign(_fd=fday).sort_values(["symbol", "_fd", "asof", "accn"])
+    ev = ev.drop_duplicates(["symbol", "_fd"], keep="last").drop(columns="_fd")
+    ev.attrs = dict(events.attrs)
+    d = sh.daily_shares(events=ev, bars=b[["ts", "symbol", "close"]])
     out = b[["date", "symbol", "ts"]].merge(d[["ts", "symbol", "shares", "market_cap", "cik"]],
                                             on=["ts", "symbol"], how="left")
     out["cik"] = out["cik"].astype(float)
