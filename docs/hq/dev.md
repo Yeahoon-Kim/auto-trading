@@ -19,7 +19,8 @@
 1. **11-18 17:00 정기 수집 뒤 US 시총 실데이터 확인** — `us_splits`가 채워졌는지, 2024-06·2015-06 시총 상위 10이 맞는지 (병합 전 오류 예: 2024-06 NVDA 1/10, 2015-06 GE 8배). 이번 수집은 EDGAR companyfacts 일괄 파일을 다시 받아 오래 걸린다.
    같은 수집에서 **KIS 순차 실행(`scripts/collect_kis_serial.ps1`, 11-18 병합 `390a6f2`)의 첫 실제 동작**도 확인 — `logs/run-kis-serial-*.out`에 kr → dividends 순서로 시작·종료가 찍혔는지, kr·dividends 실패 건수.
 2. 맞으면 **전략부 HQ에 L002 시작 신호**. 전략부에는 "HQ 신호 전까지 L002 재시작 금지"라고 전해 둔 상태.
-3. 그 밖의 일은 [dev-backlog.md](../dev-backlog.md) "결정 대기"·"대기" 순.
+3. **naver_news_live 첫 수집 거래일을 전략부 HQ에 알린다** — L004 뉴스 시험 3개의 앞으로 검증(모의투자) 시작일 (사용자 승인 11-18, 최소 60거래일·첫 상한가 30건). 이후 **수집이 빠진 날을 기록**한다 (검증 기간 결측). 병합 뒤 매일 점검에 포함.
+4. 그 밖의 일은 [dev-backlog.md](../dev-backlog.md) "결정 대기"·"대기" 순.
 
 ## 예약 작업 (Windows 작업 스케줄러)
 `autotrader-collect`(07:30·17:00·로그인), `autotrader-brief`(08:00), `autotrader-health`(12:00·20:00), `autotrader-ops`(23:00), `autotrader-weekly`(토 10:00). 등록 스크립트 `scripts/register_schedule.ps1`.
