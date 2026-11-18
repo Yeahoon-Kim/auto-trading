@@ -6,6 +6,7 @@
 
 | 날짜 | 병합 커밋 | 변경 | 기존 결과 영향 | 다시 돌릴 lab |
 |---|---|---|---|---|
+| 2026-11-18 | `831f2e8` | **US 시가총액 필드** `market_cap`·`shares`·`cik` (us_1d 원본 종가 × 분할 보정 주식수, 공시 다음 거래일부터, 같은 날 공시는 기준일 최근 하나, 주식수 기준일 400일 초과면 비움), 시총 미래참조 자동 검사, 템플릿 `top_by_mcap`(cik로 묶음) | 영향 없음 (새 필드). **`us_splits`·클래스별 주식수가 정기 수집으로 채워지기 전에는 과거 시총이 틀림** (예: 2024-06 NVDA 1/10, 2015-06 GE 8배) | L002 (수집 뒤 재확인 후 시작) |
 | 2026-11-18 | `6e8b437` | **US 주식수 데이터 보강**: 옛 CIK(지주사 재편) 16종목 사실을 `edgar_facts`에 추가, 클래스별 표지 주식수(`edgar_class_shares`), 분할 이력(`us_splits`, Yahoo 2010~), 분할 보정 주식수·시총 도우미(`data/shares.py`) | **US 재무 필드 값이 바뀜**: XOM·DIS·GOOGL 등 16종목에 재편 전 재무가 새로 생김 (병합 뒤 첫 정기 수집부터). 시총 도우미는 아직 엔진 필드 아님 | US 재무 필드를 쓰는 lab (지금은 L002 준비 중) |
 | 2026-11-17 | `4128825` | 엔진 `sizing` 옵션: `engine.run(sizing=)`·lab.yaml `execution.sizing`에 `prev_close` 추가 — paper 데스크처럼 신호 봉 종가로 수량을 정하고 다음 봉 시가에 체결(시가·종가 차이만큼 비중 어긋남 유지). 보고서 조건에 체결·수량 방식 줄 추가 | 영향 없음 (기본값 `next_open` 그대로). paper로 갈 lab은 `prev_close`로 한 번 더 돌려 운용에 가까운 수치를 볼 수 있음 | — |
 | 2026-11-17 | `6796d99` | KR 지배주주 순이익 TTM(`net_income_controlling_ttm`), `eps_ttm`(지배주주 순이익 TTM ÷ 보통+우선 상장주식수, 자사주 미차감, 우선주 코드는 NaN, PER = `raw_close` / `eps_ttm`), US EDGAR 재무 필드(`equity`, `shares_outstanding`, `revenue_ttm`, `operating_income_ttm`, `net_income_ttm` 등, 공시 다음 거래일, `fin_timing` first/last). US EPS·시가총액은 분할 이력이 없어 미제공 | 영향 없음 (새 필드, 기존 KR 재무 필드 값 그대로). 지배주주 순이익·edgar_facts 백필 전에는 값이 비어 있음 | — |
