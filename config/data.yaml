@@ -25,6 +25,9 @@ us:
 dividends:                     # `collect dividends` (collectors/dividends.py)
   dart_start_year: 2015        # 사업보고서 배당 사항 시작 사업연도 (dart_fin과 같은 범위)
   dart_max_calls: 8000         # 실행당 DART 호출 상한. 하루 한도 약 2만을 dart_disclosures·dart_fin과 나눠 쓴다
+                               # 배분 순서: 정기보고서 목록 → 배당(dart_dividend) → 기업 연고표(남은 예산 전부)
+  profile_start_year: 2015     # 기업 연고표(임원·타법인 출자·최대주주) 시작 사업연도 (collectors/dart_profile.py)
+  profile_company_refresh_days: 90  # 기업개황(본사 소재지 등, 현재 값만 제공)을 다시 받는 주기 → 변경 이력을 앞으로 쌓는다
   kis_start: "2010-01-01"      # KIS 예탁원 배당 일정(kr_dividend_schedule) 시작. 종목별 조회라 2010~ 전체가 나온다
   kis_refresh_days: 7          # 상장 중인 종목은 이 주기로 다시 조회 (새 배당결정 반영)
   alpaca_start: "2016-01-01"   # Alpaca v1 배당락 이력 시작 (2015 이전은 비어 있음 확인)
