@@ -38,7 +38,13 @@ def parse(argv=None):
     ap.add_argument("--tools", nargs="*", help="도구 일부만 (기본 = 탐지기 모듈의 TOOLS 전체)")
     ap.add_argument("--null", action="store_true", help="헛발견 검사: 종목별 일봉 묶음을 섞은 가짜 시장으로 실행")
     ap.add_argument("--null-seed", type=int, default=12345)
+    ap.add_argument("--null-method", choices=("boot", "perm"), default=H.NULL_METHOD,
+                    help="가짜 시장: boot(기본, 일봉 묶음 복원 추출) | perm(비복원 순열, 구간 합 고정 → 가짜 되돌림)")
     ap.add_argument("--seeds", type=int, default=20, help="noise floor용 위약 추출 시드 수")
+    ap.add_argument("--block", choices=("past", "both", "none"), default=H.BLOCK_MODE,
+                    help="위약 후보 차단: past(기본, 신호 뒤 20봉) | both(초기 사양 ±20봉, 미래참조 편향 — 비교용) | none")
+    ap.add_argument("--pool", choices=("xsec", "period", "year"), default=H.POOL_MODE,
+                    help="위약 후보: xsec(기본, 같은 날 다른 종목) | period(같은 종목·구간 전체, 주봉 편향) | year(초기 사양, 편향 — 비교용)")
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--max-symbols", type=int, help="개발용: 시장마다 종목 수 제한 (무작위, 시드 고정)")
     ap.add_argument("--causality-cuts", type=int, default=2, help="유니버스·분위 잘라내기 검사 지점 수 (0 = 생략)")
@@ -99,7 +105,7 @@ def run(args) -> Path:
             wide = {k: v[keep] for k, v in wide.items()}
             univ = univ[keep] if univ is not None else None
         if args.null:
-            stocks = [H.shuffle_stock(s, args.null_seed) for s in stocks]
+            stocks = [H.shuffle_stock(s, args.null_seed, method=args.null_method) for s in stocks]
         panel_last = wide["close"].index[-1]
         minfo = {"symbols": len(stocks), "data_start": str(wide["close"].index[0].date()), "data_end": str(panel_last.date()),
                  "costs": costs.describe(), "roundtrip_base_pct": round(costs.base * 100, 4),
@@ -116,7 +122,7 @@ def run(args) -> Path:
             ev["symbol"] = np.array(bt.syms)[ev["sid"].values]
             sign = ev["direction"].values
             for kind, matched in (("m", True), ("s", False)):
-                idx = H.sample_placebos(ev, bt, blocked, seed=0, matched=matched)
+                idx = H.sample_placebos(ev, bt, blocked, seed=0, matched=matched, block=args.block, pool=args.pool)
                 ev[f"n_plc_{kind}"] = (idx >= 0).sum(1)
                 for h in H.HORIZONS:
                     pm = H.placebo_means(idx, bt, f"ret{h}")
@@ -130,7 +136,7 @@ def run(args) -> Path:
             # noise floor: 위약 추출 시드만 바꿔 다시 (seed 0 포함 args.seeds개)
             for seed in range(1, args.seeds):
                 for kind, matched in (("m", True), ("s", False)):
-                    idx = H.sample_placebos(ev, bt, blocked, seed=seed, matched=matched)
+                    idx = H.sample_placebos(ev, bt, blocked, seed=seed, matched=matched, block=args.block, pool=args.pool)
                     d = sign * (ev[f"ret{H.MAIN_H}"].values - H.placebo_means(idx, bt, f"ret{H.MAIN_H}"))
                     g = pd.DataFrame({k: ev[k] for k in H.UNIT + ["period"]}).assign(d=d)
                     g = g[np.isfinite(ev[f"d{H.MAIN_H}_m"].values)]   # 본 결과와 같은 이벤트 집합
@@ -208,8 +214,9 @@ def report(args, info, summ, verdict) -> str:
           "- 수익률: 진입 = 신호 봉 다음 일봉 시가, 청산 = 진입 봉을 1봉째로 h봉째 종가 (주봉은 그 주 마지막 거래일 종가). 방향 부호를 곱함.",
           "- 초과수익 = 평균[방향 × (이벤트 수익 − 그 이벤트 위약 10개 평균)]. 위약도 같은 비용을 물리면 비용이 상쇄되므로 비용 전 값.",
           "  **비용 후 초과** = 초과수익 − 이벤트 평균 왕복 비용 (통과 기준 2 '초과수익 > 왕복 비용' ⇔ 비용 후 초과 > 0).",
-          "- 추세 맞춘 위약 = 같은 종목·같은 연도·같은 구간·유니버스 안, 직전 60봉 수익률 횡단면 5분위가 같은 날 (주 지표). 단순 위약 = 분위 무시.",
-          f"  같은 종목·같은 도구 신호 ±{H.BLOCK_BARS}봉은 위약 후보에서 뺀다.",
+          f"- 위약 후보 범위 = `{args.pool}` (xsec: 같은 신호 날짜·같은 구간·유니버스의 다른 종목 / period: 같은 종목 구간 전체 / year: 초기 사양 같은 종목·같은 연도 — 같은 종목 위약은 헛발견 검사 실패로 기본에서 뺌).",
+          "- 추세 맞춘 위약 = 위 범위·유니버스 안에서 직전 60봉 수익률 횡단면 5분위가 같은 날 (주 지표). 단순 위약 = 분위 무시.",
+          f"  위약 후보 차단 = `{args.block}` (past: 같은 종목·같은 도구 신호 날짜와 그 뒤 {H.BLOCK_BARS}봉. 신호 앞 날을 빼면 미래참조 편향이 생겨 2026-11-18에 바꿈).",
           f"- p = 날짜 묶음(일봉 = 같은 날, 주봉 = 같은 주) 부트스트랩 {H.N_BOOT}회 표준오차로 만든 양측 정규 p. "
           "Holm = 이번 실행의 모든 탐색 구간 검정 단위, 20봉, 추세 맞춘 위약.",
           f"- noise floor = 위약 추출 시드만 바꾼 {args.seeds}회의 20봉 초과수익 표준편차.",

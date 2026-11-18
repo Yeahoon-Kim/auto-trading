@@ -43,7 +43,7 @@ N_PLACEBO = 10
 MOM_BARS = 60                # 위약 분위 맞춤용 직전 수익률 길이 (봉)
 N_QUINT = 5
 MIN_XS = 25                  # 횡단면 분위를 매길 최소 종목 수 (이보다 적으면 분위 없음 → 추세 맞춘 위약 없음)
-BLOCK_BARS = MAIN_H          # 같은 종목·같은 도구 이벤트 ±이 봉은 위약 후보에서 뺀다
+BLOCK_BARS = MAIN_H          # 같은 종목·같은 도구 신호 뒤 이 봉 안의 날은 위약 후보에서 뺀다 (block_offsets 참고)
 KR_TOP_MCAP = 500
 KR_MIN_VALUE = 1e9           # 20일 평균 거래대금 10억 원
 KR_VALUE_WIN = 20
@@ -122,9 +122,15 @@ def stocks_from_wide(wide: dict) -> list[Stock]:
     return out
 
 
-def shuffle_stock(s: Stock, seed: int, boundary=BOUNDARY) -> Stock:
-    """헛발견 검사용 가짜 시장: (시가/전일종가, 고가/종가, 저가/종가, 종가/전일종가) 묶음을 날마다 무작위로 섞는다.
-    날짜·첫 종가는 그대로. 탐색/확인 구간 안에서만 섞는다 (확인 구간 수익이 탐색 구간으로 새지 않게)."""
+NULL_METHOD = "boot"
+
+
+def shuffle_stock(s: Stock, seed: int, boundary=BOUNDARY, method: str | None = None) -> Stock:
+    """헛발견 검사용 가짜 시장: (시가/전일종가, 고가/종가, 저가/종가, 종가/전일종가) 묶음을 날마다 무작위로 다시 배치한다.
+    날짜·첫 종가는 그대로. 탐색/확인 구간 안에서만 뽑는다 (확인 구간 수익이 탐색 구간으로 새지 않게).
+    method: boot(기본) = 복원 추출 → 날마다 독립. perm = 비복원 순열 (구간 합계가 고정되어 '직전에 많이 오르면 남은 날은 덜
+    오른다'는 가짜 되돌림이 생긴다: 2026-11-18 모멘텀 가짜 탐지기 C가 perm 가짜 시장에서 유의하게 나와 바꿈)."""
+    method = method or NULL_METHOD
     rng = np.random.default_rng([seed, zlib.crc32(s.sym.encode())])
     n = len(s.c)
     pc = s.c[:-1]
@@ -133,7 +139,14 @@ def shuffle_stock(s: Stock, seed: int, boundary=BOUNDARY) -> Stock:
     perm = np.arange(n - 1)
     for m in (seg, ~seg):
         pos = np.flatnonzero(m)
-        perm[pos] = pos[rng.permutation(len(pos))]
+        if len(pos) == 0:
+            continue
+        if method == "perm":
+            perm[pos] = pos[rng.permutation(len(pos))]
+        elif method == "boot":
+            perm[pos] = pos[rng.integers(len(pos), size=len(pos))]
+        else:
+            raise ValueError(method)
     tup = tup[perm]
     c = np.empty(n)
     c[0] = s.c[0]
@@ -376,9 +389,43 @@ def attach_events(ev: pd.DataFrame, bt: BarTable, periods) -> tuple[pd.DataFrame
 
 
 # ───────────────────────── 위약 ─────────────────────────
-def sample_placebos(ev: pd.DataFrame, bt: BarTable, blocked: dict, seed: int, matched: bool) -> np.ndarray:
-    """이벤트마다 위약 봉 표 행 번호 N_PLACEBO개 (없으면 -1). 같은 종목·같은 연도·같은 구간·유니버스·20봉 수익 있음,
-    같은 도구 이벤트 ±BLOCK_BARS 제외. matched면 직전 60봉 수익률 횡단면 5분위도 같게."""
+def block_offsets(mode: str) -> np.ndarray:
+    """위약 후보 p를 뺄 '신호 e 기준' 거리 (p − e).
+    past(기본): 0 ~ +BLOCK_BARS — 신호 날짜와, 직전 20봉 안에 같은 도구 신호가 있었던 날만 뺀다 (p 시점에 이미 아는 정보).
+    both(초기 사양 ±20봉): p 뒤 20봉 안에 신호가 '나올' 날까지 빼서 미래참조 선택 편향이 생긴다 (2026-11-18 헛발견 검사 실패 원인).
+    none: 신호 날짜만."""
+    if mode == "past":
+        return np.arange(0, BLOCK_BARS + 1)
+    if mode == "both":
+        return np.arange(-BLOCK_BARS, BLOCK_BARS + 1)
+    if mode == "none":
+        return np.arange(0, 1)
+    raise ValueError(mode)
+
+
+BLOCK_MODE = "past"
+
+
+# 위약 후보 범위. 사양(사용자 승인)은 "같은 종목·같은 연도"였으나 2026-11-18 헛발견 검사에서 실패했다.
+# 같은 종목 위약은 이벤트와 같은 가격 경로를 공유한다: 신호는 직전 경로(200봉 이동평균, 60봉 수익 등)의 함수인데, 같은 종목의
+# 다른 날 앞으로 20봉 창이 그 경로와 겹치면 위약 평균이 신호 쪽으로 기운다 (유한 표본 종목 평균 편향). 같은 연도로 좁히면
+# 겹침 비중이 커서 크고(실제 탐지기 null 8건 통과), 구간 전체로 넓혀도 주봉·직전 수익 극단 신호에는 남는다(가짜 탐지기 C, 독립
+# 가짜 시장에서 Holm 유의). 같은 날짜의 다른 종목(xsec)은 경로를 공유하지 않아 이 편향이 없다 → 기본값.
+# 대안 비교와 수치: results/A/harness-check.md
+POOL_MODE = "xsec"
+
+
+def sample_placebos(ev: pd.DataFrame, bt: BarTable, blocked: dict, seed: int, matched: bool,
+                    block: str | None = None, pool: str | None = None) -> np.ndarray:
+    """이벤트마다 위약 봉 표 행 번호 N_PLACEBO개 (없으면 -1). 유니버스·같은 구간·20봉 수익 있음.
+    pool: year(사양) = 같은 종목·같은 연도 / period = 같은 종목·구간 전체 / xsec = 같은 날짜의 다른 종목.
+    같은 종목 위약은 같은 도구 신호 기준 block_offsets(block) 거리의 날 제외. matched면 직전 60봉 수익률 횡단면 5분위도 같게."""
+    pool = pool or POOL_MODE
+    if pool == "xsec":
+        return _sample_xsec(ev, bt, seed, matched)
+    if pool not in ("year", "period"):
+        raise ValueError(pool)
+    yr = 1 if pool == "year" else 0
     rng = np.random.default_rng(seed)
     out = np.full((len(ev), N_PLACEBO), -1, np.int64)
     df = bt.df
@@ -392,10 +439,10 @@ def sample_placebos(ev: pd.DataFrame, bt: BarTable, blocked: dict, seed: int, ma
     pk, pyear = df["k"].values[pidx], df["year"].values[pidx].astype(np.int64)
     pper = df["period"].values[pidx].astype(np.int64)
     pq = np.nan_to_num(df["quint"].values[pidx], nan=-1).astype(np.int64) if matched else np.zeros(len(pidx), np.int64)
-    pkey = pper * 1_000_000 + pyear * 10 + pq
-    ekey = (ev["period"].values.astype(np.int64) * 1_000_000 + ev["year"].values.astype(np.int64) * 10
+    pkey = pper * 1_000_000 + yr * pyear * 10 + pq
+    ekey = (ev["period"].values.astype(np.int64) * 1_000_000 + yr * ev["year"].values.astype(np.int64) * 10
             + (np.nan_to_num(ev["quint"].values, nan=-9).astype(np.int64) if matched else 0))
-    off = np.arange(-BLOCK_BARS, BLOCK_BARS + 1)
+    off = block_offsets(block or BLOCK_MODE)
     for (sid, tool), rows in ev.groupby(["sid", "tool"]).indices.items():
         lo, hi = np.searchsorted(psym, sid), np.searchsorted(psym, sid, side="right")
         if hi == lo:
@@ -418,6 +465,41 @@ def sample_placebos(ev: pd.DataFrame, bt: BarTable, blocked: dict, seed: int, ma
             else:
                 pick = rng.integers(P, size=(m, N_PLACEBO))
             out[tgt] = cand[pick]
+    return out
+
+
+def _sample_xsec(ev: pd.DataFrame, bt: BarTable, seed: int, matched: bool) -> np.ndarray:
+    """같은 날짜(같은 신호 봉 날짜)·같은 구간·유니버스의 다른 종목 N_PLACEBO개 (matched면 같은 5분위)."""
+    rng = np.random.default_rng(seed)
+    out = np.full((len(ev), N_PLACEBO), -1, np.int64)
+    df = bt.df
+    ok = df["period"].values >= 0
+    if matched:
+        ok &= np.isfinite(df["quint"].values)
+    pidx = np.flatnonzero(ok)
+    day = df["date"].values[pidx].astype("datetime64[D]").astype(np.int64)
+    pq = np.nan_to_num(df["quint"].values[pidx], nan=-1).astype(np.int64) if matched else np.zeros(len(pidx), np.int64)
+    pkey = day * 10 + pq
+    order = np.argsort(pkey, kind="stable")
+    pidx, pkey = pidx[order], pkey[order]
+    psym = df["sym"].values[pidx]
+    eday = ev["date"].values.astype("datetime64[D]").astype(np.int64)
+    eq = np.nan_to_num(ev["quint"].values, nan=-9).astype(np.int64) if matched else np.zeros(len(ev), np.int64)
+    ekey = eday * 10 + eq
+    esym = ev["sid"].values
+    for key, rows in pd.Series(np.arange(len(ev))).groupby(ekey).indices.items():
+        if eq[rows[0]] < 0:
+            continue
+        lo, hi = np.searchsorted(pkey, key), np.searchsorted(pkey, key, side="right")
+        P = hi - lo
+        if P < 2:
+            continue
+        cand, cs = pidx[lo:hi], psym[lo:hi]
+        for r in rows:   # 자기 종목 제외
+            c = cand[cs != esym[r]]
+            if len(c) == 0:
+                continue
+            out[r] = c[rng.choice(len(c), N_PLACEBO, replace=len(c) < N_PLACEBO)]
     return out
 
 

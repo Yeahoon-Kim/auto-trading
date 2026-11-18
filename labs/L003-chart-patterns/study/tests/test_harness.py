@@ -125,19 +125,29 @@ def test_placebo_rules():
         ev.append(pd.DataFrame({"date": s.dates[k], "direction": 1, "tool": "t", "variant": "v", "sym": s.sym}))
     ev = pd.concat(ev, ignore_index=True)
     ev, blocked, _ = H.attach_events(ev, bt, (0, 1))
-    for matched in (True, False):
-        idx = H.sample_placebos(ev, bt, blocked, seed=0, matched=matched)
+    for pool, matched in [(p, m) for p in ("year", "period") for m in (True, False)]:
+        idx = H.sample_placebos(ev, bt, blocked, seed=0, matched=matched, pool=pool)
         assert (idx >= 0).all(1).mean() > 0.9
         df = bt.df
         for i in range(len(ev)):
             p = idx[i][idx[i] >= 0]
             pr = df.iloc[p]
             e = ev.iloc[i]
-            assert (pr["sym"] == e["sid"]).all() and (pr["year"] == e["year"]).all() and (pr["period"] == e["period"]).all()
+            assert (pr["sym"] == e["sid"]).all() and (pr["period"] == e["period"]).all()
+            if pool == "year":
+                assert (pr["year"] == e["year"]).all()
             bk = blocked[(e["sid"], "t")]
-            assert (np.abs(pr["k"].values[:, None] - bk[None, :]).min(1) > H.BLOCK_BARS).all()
+            dk = pr["k"].values[:, None] - bk[None, :]          # 위약 − 신호 (봉)
+            assert not ((dk >= 0) & (dk <= H.BLOCK_BARS)).any()  # 신호 날짜·신호 뒤 20봉은 빠진다
             if matched:
                 assert (pr["quint"] == e["quint"]).all()
+    # xsec: 같은 날짜·같은 분위의 다른 종목
+    idx = H.sample_placebos(ev, bt, blocked, seed=0, matched=True, pool="xsec")
+    df = bt.df
+    for i in range(0, len(ev), 7):
+        p = idx[i][idx[i] >= 0]
+        pr, e = df.iloc[p], ev.iloc[i]
+        assert len(p) and (pr["date"] == e["date"]).all() and (pr["sym"] != e["sid"]).all() and (pr["quint"] == e["quint"]).all()
     # 같은 시드면 같은 결과, 다른 시드면 다른 결과
     a = H.sample_placebos(ev, bt, blocked, seed=5, matched=True)
     assert (a == H.sample_placebos(ev, bt, blocked, seed=5, matched=True)).all()
@@ -147,7 +157,7 @@ def test_placebo_rules():
 def test_shuffle_preserves_daily_tuples():
     w = _wide(3, kr=False)
     s = H.stocks_from_wide(w)[1]
-    z = H.shuffle_stock(s, 1)
+    z = H.shuffle_stock(s, 1, method="perm")
     def tup(x):
         return np.column_stack([x.o[1:] / x.c[:-1], x.h[1:] / x.c[1:], x.l[1:] / x.c[1:], x.c[1:] / x.c[:-1]])
     a, b = tup(s), tup(z)
@@ -156,6 +166,13 @@ def test_shuffle_preserves_daily_tuples():
         np.testing.assert_allclose(np.sort(a[m], 0), np.sort(b[m], 0), rtol=1e-9)
     assert z.c[0] == s.c[0] and not np.allclose(a, b)
     assert (z.h >= np.maximum(z.o, z.c) - 1e-9).all() and (z.l <= np.minimum(z.o, z.c) + 1e-9).all()
+    # boot: 같은 구간의 원래 묶음 중에서 복원 추출
+    zb = H.shuffle_stock(s, 1, method="boot")
+    bb = tup(zb)
+    for m in (seg, ~seg):
+        orig = {tuple(np.round(x, 9)) for x in a[m]}
+        assert all(tuple(np.round(x, 9)) in orig for x in bb[m])
+    assert len({tuple(np.round(x, 9)) for x in bb}) < len(bb)   # 중복이 생긴다 (복원)
 
 
 def test_holm():
