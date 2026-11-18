@@ -39,6 +39,7 @@ def collect_yahoo() -> None:
                       progress=False, threads=True)
     ny_now = pd.Timestamp.now(tz="America/New_York")
     cutoff = ny_now.normalize() + (pd.Timedelta(days=1) if ny_now.hour >= 17 else pd.Timedelta(0))
+    ok = 0
     for ticker, name in YAHOO.items():
         try:
             d = raw[ticker].dropna(subset=["Close"])
@@ -50,13 +51,15 @@ def collect_yahoo() -> None:
             })
             store.write("macro_1d", name, df)
             store.set_state("macro_1d", name, backfill_done=True)
+            ok += 1
         except Exception as e:
             store.set_state("macro_1d", name, status="error", error=str(e)[:500])
             logger.error(f"macro_1d {name} 실패: {e}")
-    logger.info(f"macro_1d {len(YAHOO)}개 갱신")
+    logger.info(f"macro_1d {ok}개 갱신, {len(YAHOO) - ok}개 실패")
 
 
 def collect_fred() -> None:
+    ok = 0
     for sid in FRED:
         try:
             r = _http.get("https://fred.stlouisfed.org/graph/fredgraph.csv", params={"id": sid})
@@ -68,10 +71,11 @@ def collect_fred() -> None:
             df = pd.DataFrame({"ts": pd.to_datetime(d["date"]).dt.tz_localize("UTC"), "value": d["value"].values})
             store.write("fred", sid, df[df["ts"] >= pd.Timestamp("2005-01-01", tz="UTC")])
             store.set_state("fred", sid, backfill_done=True)
+            ok += 1
         except Exception as e:
             store.set_state("fred", sid, status="error", error=str(e)[:500])
             logger.error(f"fred {sid} 실패: {e}")
-    logger.info(f"fred {len(FRED)}개 갱신")
+    logger.info(f"fred {ok}개 갱신, {len(FRED) - ok}개 실패")
 
 
 def collect_fear_greed() -> None:
