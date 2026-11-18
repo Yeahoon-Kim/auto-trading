@@ -73,6 +73,34 @@ def valuation(data) -> dict[str, pd.DataFrame]:
     return out
 
 
+def top_by_mcap(data, n: int = 10, prefer: pd.DataFrame | None = None) -> pd.DataFrame:
+    """[예시] 날짜마다 시가총액 상위 n개 회사 (us_stock). lab.yaml fields: [market_cap, cik] (prefer에 쓸 것도).
+    다중 클래스 방침: 엔진의 market_cap은 회사 단위라 한 회사 종목이 여럿(GOOG·GOOGL, FOX·FOXA, NWS·NWSA)이면
+    둘 다 회사 전체 시총이 나온다. 엔진은 어느 쪽도 빼지 않으므로 순위를 매기기 전에 cik로 묶어 한 종목만 남긴다.
+    남길 종목: prefer(날짜 × 종목 점수, 예: 20일 평균 거래대금 (data.close * data.volume).rolling(20).mean())가
+    큰 종목, prefer가 없으면 종목 이름순 첫 종목 (GOOG < GOOGL). 고른 방침은 hypothesis.md에 적는다.
+    cik가 없는 종목(주식수 공시 전)은 시가총액도 없어 순위에 들지 않는다.
+    반환: 날짜 × 종목 bool (그날 상위 n이면 True). 그날 알 수 있는 값만 쓰므로 그대로 신호에 써도 된다."""
+    mc = data.market_cap
+
+    def long(x, name):   # 날짜 × 종목 → (date, symbol, name) 행
+        return x.reindex_like(mc).rename_axis(index="date", columns="symbol").reset_index().melt(
+            id_vars="date", var_name="symbol", value_name=name)
+
+    df = long(mc, "mc")
+    df["cik"] = long(data.cik, "cik")["cik"].to_numpy()
+    df["pref"] = long(prefer, "pref")["pref"].fillna(float("-inf")).to_numpy() if prefer is not None else 0.0
+    df = df.dropna(subset=["mc"])
+    df["key"] = df["cik"].map(lambda x: f"cik{int(x)}" if pd.notna(x) else None).fillna(df["symbol"])
+    df = df.sort_values(["date", "key", "pref", "symbol"], ascending=[True, True, False, True])
+    df = df.drop_duplicates(["date", "key"])
+    df = df[df.groupby("date")["mc"].rank(ascending=False, method="first") <= n]
+    top = pd.DataFrame(False, index=mc.index, columns=mc.columns)
+    for d, s in df.groupby("date")["symbol"]:
+        top.loc[d, list(s)] = True
+    return top
+
+
 # 선택: 학습 창 데이터로 파라미터를 고르는 경우에만 정의한다. 워크포워드가 창마다 호출한다.
 # def fit(train_data, params: dict) -> dict:
 #     return params
