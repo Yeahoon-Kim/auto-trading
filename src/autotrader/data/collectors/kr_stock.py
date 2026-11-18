@@ -31,24 +31,62 @@ def kis() -> KISClient:
     return _kis
 
 
+# OPSQ0002(KIS 서버 일시 오류)는 몇 분짜리 장애(11-17 10:06~10:09)에도 나온다 → 길게 재시도.
+# 단, 장애가 OUTAGE_MAX초 넘게 이어지면(모든 스레드 공통) 더 기다리지 않고 바로 실패시켜 수집 전체 시간을 묶는다.
+OUTAGE_CODES = ("OPSQ0002",)
+OUTAGE_MAX = 600.0  # 장애로 보고 기다려 줄 최대 시간(초). 넘으면 이후 호출은 짧은 재시도만
+_outage_since: float | None = None  # 장애 연속 시작 시각(time.monotonic). 성공 한 번이면 초기화
+
+
+def _sleep(sec: float) -> None:  # 테스트에서 바꿔 끼우는 지점
+    time.sleep(sec)
+
+
 def _get(path: str, tr_id: str, params: dict) -> dict:
+    global _outage_since
     c = kis()
-    for i in range(6):
+    last = ""  # 마지막 실패 메시지(KIS msg_cd·msg1 또는 예외 종류). 키·토큰·계좌번호는 들어가지 않는다
+    i = 0      # 일반 재시도 횟수
+    while True:
         _limit.wait()
         try:
-            return c.get(path, tr_id, params)
+            out = c.get(path, tr_id, params)
+            _outage_since = None
+            return out
         except RuntimeError as e:
+            last = str(e)[:300]
             # EGW00201: 초당 한도 초과, OPSQ1002: SESSION FULL(동시 세션 초과) → 길게 쉬고 재시도
-            if "EGW00201" in str(e) or "OPSQ1002" in str(e):
-                time.sleep(min(60, 5 * 2 ** i))
-                continue
+            if "EGW00201" in last or "OPSQ1002" in last:
+                if i < 6:
+                    _sleep(min(60, 5 * 2 ** i))
+                    i += 1
+                    continue
+                break
+            if any(code in last for code in OUTAGE_CODES):
+                now = time.monotonic()
+                if _outage_since is None:
+                    _outage_since = now
+                elapsed = now - _outage_since
+                if elapsed < OUTAGE_MAX:
+                    # 지수 대기 2·4·8·16·30·30…초, 장애 상한까지
+                    _sleep(min(30, 2 * 2 ** i, OUTAGE_MAX - elapsed + 1))
+                    i += 1
+                    continue
             if i < 2:
-                time.sleep(1 + i)
+                _sleep(1 + i)
+                i += 1
                 continue
-            raise
-        except Exception:
-            time.sleep(2 ** i)
-    raise RuntimeError(f"KIS {tr_id} 반복 실패")
+            break
+        except Exception as e:
+            # 네트워크·HTTP 오류: 응답 본문 대신 예외 종류와 메시지만 (요청 헤더는 담지 않는다)
+            last = f"{type(e).__name__}: {str(e)[:200]}"
+            if i < 6:
+                _sleep(2 ** i)
+                i += 1
+                continue
+            break
+    logger.warning(f"KIS {tr_id} 최종 실패 ({i + 1}회 시도) 마지막 응답: {last}")
+    raise RuntimeError(f"KIS {tr_id} 반복 실패 — 마지막 응답: {last}")
 
 
 # ── 유니버스 ──

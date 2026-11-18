@@ -407,6 +407,7 @@ def patch_dart_fin() -> None:
 def collect_ecos() -> None:
     key = os.environ["ECOS_API_KEY"]
     end = pd.Timestamp.now(tz=KST).strftime("%Y%m%d")
+    ok = 0
     for name, (stat, cycle, item) in ECOS.items():
         try:
             j = get_json(_http, f"https://ecos.bok.or.kr/api/StatisticSearch/{key}/json/kr/1/100000/"
@@ -419,10 +420,11 @@ def collect_ecos() -> None:
                                "value": pd.to_numeric(d["DATA_VALUE"], errors="coerce")}).dropna()
             store.write("ecos", name, df)
             store.set_state("ecos", name, backfill_done=True)
+            ok += 1
         except Exception as e:
             store.set_state("ecos", name, status="error", error=str(e)[:500])
             logger.error(f"ecos {name} 실패: {e}")
-    logger.info(f"ecos {len(ECOS)}개 갱신")
+    logger.info(f"ecos {ok}개 갱신, {len(ECOS) - ok}개 실패")
 
 
 def run(symbols: list[str] | None = None) -> None:
