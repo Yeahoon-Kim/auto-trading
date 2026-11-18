@@ -433,6 +433,10 @@ def report(s: dict) -> str:
             lines.append("- 수량을 묶은 한도: " + ", ".join(f"{k} {v}" for k, v in ts["binding"].items()))
         if ts.get("blocked"):
             lines.append("- 진입 못 한 신호: " + ", ".join(f"{k} {v}" for k, v in ts["blocked"].items()))
+        if ts.get("order_cap"):
+            oc = ts["order_cap"]
+            lines.append(f"- 1회 주문 상한 {oc['cap_krw']:,.0f}원 (백테스트는 자르지 않음, paper·live만 적용): "
+                         f"상한이 있었다면 잘렸을 주문 {oc['would_cap']}건, 그중 진입 못 했을 주문 {oc['would_block']}건")
     lines += ["", "## 고정 기준", "| # | 기준 | 값 | 통과 |", "|---|---|---|---|"]
     for c in s["checks"]:
         p = {True: "✅", False: "❌", None: "미확인"}[c["pass"]]
