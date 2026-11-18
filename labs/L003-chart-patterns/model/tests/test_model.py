@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -18,6 +19,10 @@ import dataset as D  # noqa: E402
 import walkforward as W  # noqa: E402
 
 H = D.H
+
+# ridge·hgb 모델은 scikit-learn이 필요하다. 프로젝트 의존성이 아니므로 없으면 건너뛴다.
+needs_sklearn = pytest.mark.skipif(importlib.util.find_spec("sklearn") is None,
+                                   reason="scikit-learn 미설치 (L003 lab 전용, 프로젝트 의존성 아님)")
 
 
 # ───────────────────────── 합성 데이터셋 (특징·목표값 직접 생성) ─────────────────────────
@@ -113,6 +118,7 @@ def test_block_key_horizon60():
     assert np.bincount(pd.factorize(W.block_key(day, np.ones(2000), 60))[0]).max() == 420
 
 
+@needs_sklearn
 def test_walkforward_horizon60_null_and_leak():
     df, feats = synth_ds60(seed=5)
     _, summ, _, hp = W.walk_forward(df, ("zero", "ridge"), (0,), feats, log=lambda *_: None, horizon=60)
@@ -139,6 +145,7 @@ def test_confirm_mode_trains_on_explore_only():
 
 
 # ───────────────────────── (a)(b) 합성 헛발견·검출력 ─────────────────────────
+@needs_sklearn
 @pytest.mark.parametrize("seed", [1, 2])
 def test_null_synthetic_no_pass(seed):
     df, feats = synth_ds(seed=seed)
@@ -150,6 +157,7 @@ def test_null_synthetic_no_pass(seed):
     assert (summ["top_net"] < 0.01).all()
 
 
+@needs_sklearn
 def test_leak_synthetic_passes():
     df, feats = synth_ds(seed=3, leak_corr=0.3)
     df["y"] += 0.0   # 그대로
