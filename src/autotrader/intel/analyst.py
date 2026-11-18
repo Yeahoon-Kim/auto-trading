@@ -28,7 +28,7 @@ SYSTEM = """너는 헤지펀드 시장정보팀의 애널리스트다. 매일 �
 
 def _changes(regime: pd.DataFrame) -> str:
     """주요 지표의 현재값과 5·20거래일 전 값."""
-    cols = ["risk_regime", "risk_off_signals", "vix", "vix_term", "hy_spread", "t10y2y", "usdkrw", "dxy",
+    cols = ["risk_regime", "risk_off_signals", "risk_off_available", "vix", "vix_term", "hy_spread", "t10y2y", "usdkrw", "dxy",
             "fng", "funding_avg_7d_ann", "kimchi_premium_btc", "spx_trend", "kospi_trend", "btc_trend",
             "spx_ret_20d", "kospi_ret_20d", "btc_ret_20d", "spx_rv_pctile", "kospi_rv_pctile", "btc_rv_pctile"]
     r = regime[[c for c in cols if c in regime]].dropna(how="all")

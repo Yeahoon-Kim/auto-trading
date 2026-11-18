@@ -20,6 +20,8 @@ from ..data import store
 ROOT = Path(__file__).resolve().parents[3]
 REPORT_DIR = ROOT / "reports" / "market"
 ANN = np.sqrt(252)
+START = "2010-01-01"  # macro_1d가 2010-01부터 있음 (2026-11-18 이전에는 2015-01-01)
+RISK_OFF_N = 4  # 위험회피 신호 정의 개수
 
 
 def _close(dataset: str, symbol: str, col: str = "close") -> pd.Series:
@@ -40,9 +42,11 @@ def _daily_from_1m(dataset: str, symbol: str) -> pd.Series:
 def _trend_block(px: pd.Series, prefix: str) -> pd.DataFrame:
     ret = px.pct_change()
     rv = ret.rolling(20).std() * ANN
+    ma200 = px.rolling(200).mean()
     out = pd.DataFrame({
         f"{prefix}_close": px,
-        f"{prefix}_above_200d": px > px.rolling(200).mean(),
+        # 200일선이 아직 없는 워밍업 구간은 NaN (False로 두면 '200일선 아래'로 잘못 읽힌다)
+        f"{prefix}_above_200d": (px > ma200).astype(object).where(ma200.notna()),
         f"{prefix}_ret_20d": px.pct_change(20),
         f"{prefix}_rv_20d": rv,
         # 변동성 백분위: 최근 3년(756일) 중 현재 위치
@@ -84,7 +88,7 @@ def compute() -> pd.DataFrame:
         crypto["kimchi_premium_btc"] = up / (btc * usdkrw.reindex(btc.index).ffill()) - 1
 
     df = pd.concat(parts + [macro, crypto], axis=1).sort_index()
-    df = df[df.index >= "2015-01-01"]
+    df = df[df.index >= START]  # 지표는 자르기 전 전체 원천으로 계산 → 원천이 앞선 만큼 워밍업이 짧아진다
     for p in ("spx", "kospi", "btc"):  # 실제 관측일 표시 (아래 ffill로 채운 날과 구분)
         df[f"{p}_observed"] = df[f"{p}_close"].notna()
     df = df.ffill(limit=5)  # 시장별 휴일 차이 메우기 (최대 5일)
@@ -92,20 +96,34 @@ def compute() -> pd.DataFrame:
 
 
 def _labels(df: pd.DataFrame) -> pd.DataFrame:
+    """추세·변동성·위험 국면 라벨. 판단에 필요한 값이 없는 날(워밍업·원천 공백)은 라벨을 비운다(None)."""
     for p in ("spx", "kospi", "btc"):
-        up = df[f"{p}_above_200d"].astype(bool) & (df[f"{p}_ret_20d"] > 0)
-        down = ~df[f"{p}_above_200d"].astype(bool) & (df[f"{p}_ret_20d"] < 0)
-        df[f"{p}_trend"] = np.select([up, down], ["상승", "하락"], "혼조")
-        df[f"{p}_vol"] = np.select([df[f"{p}_rv_pctile"] < 0.3, df[f"{p}_rv_pctile"] > 0.8], ["낮음", "높음"], "보통")
-    # 위험선호 점수: 위험회피 신호 개수 (0~4)
-    off = (
-        (df["vix_term"] > 1).astype(int)
-        + (df["vix"] > 25).astype(int)
-        + (df["hy_spread_chg_20d"] > 0.5).astype(int)
-        + (~df["spx_above_200d"].astype(bool)).astype(int)
-    )
+        above, ret = df[f"{p}_above_200d"], df[f"{p}_ret_20d"]
+        ok = above.notna() & ret.notna()
+        up = ok & above.eq(True) & (ret > 0)
+        down = ok & above.eq(False) & (ret < 0)
+        df[f"{p}_trend"] = np.select([up, down, ok], ["상승", "하락", "혼조"], None)
+        pct = df[f"{p}_rv_pctile"]
+        df[f"{p}_vol"] = np.select([pct < 0.3, pct > 0.8, pct.notna()], ["낮음", "높음", "보통"], None)
+    # 위험회피 신호 (정의 4개). 원천이 없는 날 그 신호는 '없음'이 아니라 '셀 수 없음'으로 본다:
+    #   risk_off_available = 그날 셀 수 있는 신호 개수, risk_off_signals = 그중 켜진 개수.
+    #   하나도 셀 수 없으면 둘 다 NaN·국면 None. (예: HY 스프레드는 FRED에 2023-11부터만 있어
+    #   그 전에는 available이 최대 3.) 국면 기준(3개 이상 위험회피, 1개 이상 중립)은 개수 그대로 쓴다.
+    sig = pd.DataFrame({
+        "vix_term": df["vix_term"] > 1,
+        "vix": df["vix"] > 25,
+        "hy": df["hy_spread_chg_20d"] > 0.5,
+        "spx_below_200d": df["spx_above_200d"].eq(False),
+    })
+    avail = pd.DataFrame({
+        "vix_term": df["vix_term"].notna(), "vix": df["vix"].notna(),
+        "hy": df["hy_spread_chg_20d"].notna(), "spx_below_200d": df["spx_above_200d"].notna(),
+    })
+    n = avail.sum(axis=1)
+    off = (sig & avail).sum(axis=1).astype(float).where(n > 0)
+    df["risk_off_available"] = n.astype(float).where(n > 0)
     df["risk_off_signals"] = off
-    df["risk_regime"] = np.select([off >= 3, off >= 1], ["위험회피", "중립"], "위험선호")
+    df["risk_regime"] = np.select([off >= 3, off >= 1, off.notna()], ["위험회피", "중립", "위험선호"], None)
     return df
 
 
@@ -131,7 +149,9 @@ def brief(df: pd.DataFrame, health_line: str = "") -> str:
         f"📊 장 전 브리핑 — {pd.Timestamp.now(tz='Asia/Seoul'):%Y-%m-%d (%a)}",
         f"(확정 종가 기준: 미국 {last.name:%m-%d} · 한국 {kos.name:%m-%d} · 코인 {btc.name:%m-%d} UTC)",
         "",
-        f"■ 위험 국면: {last['risk_regime']} (위험회피 신호 {int(last['risk_off_signals'])}/4)",
+        f"■ 위험 국면: {last['risk_regime'] or '-'} (위험회피 신호 {_fmt(last['risk_off_signals'], 'int')}/{RISK_OFF_N}"
+        + ("" if last.get("risk_off_available") == RISK_OFF_N
+           else f", 셀 수 있는 신호 {_fmt(last.get('risk_off_available'), 'int')}개") + ")",
         f"  VIX {_fmt(last['vix'])} · 기간구조 {_fmt(last['vix_term'])} {'(역전·스트레스)' if last['vix_term'] > 1 else ''}",
         f"  하이일드 스프레드 {_fmt(last['hy_spread'])}%p (20일 {_fmt(last['hy_spread_chg_20d'])}) · 10Y-2Y {_fmt(last['t10y2y'])}",
         "",
