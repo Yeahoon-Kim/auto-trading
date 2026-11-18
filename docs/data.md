@@ -68,6 +68,8 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 | `us_dividends` (symbol=ALL) | 미국 **현금·주식배당**: `ts` = 배당락일, `rate`(주당 금액, 원본·분할 미반영), `record_date`, `payable_date`, `special`, `foreign`, `cusip`. ETF·펀드 포함 | Alpaca corporate actions v1 (키 필요) | **시장 전체**(상장폐지 포함), 배당락 2016~ | 매일 (최근 150일 + 발표된 90일 앞까지 재수집) |
 | `us_dividend_announcements` (symbol=ALL) | 미국 배당 발표 기록: `ts` = Alpaca `declaration_date` (**실제 결의일이 아님**, 아래 한계 참고), `cash`, `ex_date`, `record_date`, `payable_date`, `sub_type` | Alpaca corporate action announcements v2 (키 필요) | 시장 전체(2020~21은 뮤추얼펀드 다수), 2020~ | 매일 (최근 30일 재수집) |
 | `news` (symbol=ALL) | 미국 주식·코인 뉴스 (Benzinga): `id`, `ts`(기사 작성 시각), `updated_at`, `symbols`(쉼표로 이은 티커, 코인은 `BTCUSD`), `headline`, `summary`, `source`, `url`. 본문 없음 | Alpaca News API 무료 플랜 (키 필요) | 2015-01~ | 매일 |
+| `naver_trend` (symbol=ALL) | **네이버 검색어 트렌드** (일별 검색량 상대값): `ts`(날짜 KST 0시 → UTC), `keyword`, `symbol`(종목코드, 추가 검색어는 ""), `ratio`, **`win_start`·`win_end`(요청 창)**, `group`(같은 요청 키워드 5개, `\|`로 연결), `collected_at`. 키 = (ts, keyword, win_start, win_end). **창이 다르면 값이 상수배 다르다** → 아래 '네이버' 절의 시점 규칙대로 쓴다 | NAVER API HUB 데이터랩 (키 필요) | kr_daily 유니버스 보통주 중 2016년 이후 상장 중이던 종목명(약 2,900개) + `naver.trend.extra_keywords`, 2016-01~ | 매일 (어제까지 창 1개 갱신, 백필은 하루 2천 요청씩 약 7일) |
+| `naver_news_live` (symbol=ALL) | **네이버 뉴스 검색 앞으로 수집**: `ts`(발행 시각, 분 단위 → UTC), `title`·`summary`(태그 제거), `link`, `originallink`, `domain`(언론사 대신 원문 주소 호스트), `query`, `query_kind`(theme·stock), `symbol`, `collected_at`. 키 = (link, query) — 한 기사가 여러 질의에 걸리면 질의마다 1행. 본문 없음. **저작권 대상: data/ 밖으로 내보내지 않는다** | NAVER API HUB 뉴스 검색 (같은 키) | 2026-11-18~ (과거분 없음, 기간 지정 불가) | 하루 2~3회 (07:30·17:00·로그인) |
 | `ecos` | 기준금리, 국고채 3·10년, 회사채 AA- 3년, CD 91일, 원/달러 | 한국은행 ECOS | 2005~ | 매일 |
 | `legacy/*.parquet` | 기존 stock-analysis-site DB에서 가져온 것: 일봉(KR 3,259·US 5,487종목, 2016-08~ +시가총액), 실제 지수 구성종목, 재무제표(K-IFRS 349사·US GAAP 511사, 2021~), 공시(SEC 1995~, DART 2024-08~), 내부자 거래(SEC Form 4 2000~) | Docker Postgres (1회 가져오기) | 표 참고 | 수동 (`collect legacy`) |
 | `scan_hits` (symbol=ALL) | 장 전 스캐너가 규칙에 맞았다고 표시한 종목 (시장·셋업·종가·20일 평균 거래대금) | 위 데이터에서 계산 | 2026-11-15~ (셋업 함수로 과거 재계산 가능) | 매일 08:00 |
@@ -157,6 +159,33 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 - **뉴스 시점** (`news`): 기사는 `ts`(작성 시각, UTC) 이후에만 쓸 수 있다. 분봉 전략은 `ts`가 속한 봉의 다음 봉부터, 일봉 전략은 장 마감 뒤 기사면 다음 거래일부터 쓴다. headline·summary는 나중에 고쳐질 수 있고 저장된 건 수집 시점의 최신 값이라, `updated_at > ts`인 기사는 원래 문구와 다를 수 있다.
 - **뉴스 범위**: Benzinga 한 곳이고 영문뿐이다. 국내 종목 뉴스는 없다. `symbols`는 Benzinga 태깅이라 빠지거나 넓게 붙은 경우가 있다.
 - 데이터 스냅샷(lab 재현용)은 백테스트 엔진을 만들 때 함께 구현한다.
+
+## 네이버 (NAVER API HUB) — `naver_trend`, `naver_news_live`
+
+- 수집기: `src/autotrader/data/collectors/naver.py`. 키: `.env`의 `NAVER_CLIENT_ID`·`NAVER_CLIENT_SECRET` (네이버 클라우드 API Gateway 헤더 `X-NCP-APIGW-API-KEY-ID`·`X-NCP-APIGW-API-KEY`). 없으면 건너뛴다.
+- **정기 수집 등록**: `scripts/collect_all.ps1`의 기본 소스 목록에 `naver-trend`, `naver-news`가 들어 있다. 작업 스케줄러 `autotrader-collect`(07:30·17:00·로그인)가 메인 폴더에서 이 스크립트를 부르므로 master에 병합되면 따로 등록할 것이 없다. 하나만 돌릴 때:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File scripts\collect_all.ps1 -Sources naver-trend,naver-news
+  uv run python -m autotrader.data.cli collect naver-trend
+  ```
+- **호출 한도** (`config/data.yaml`의 `naver`): 실제 HTTP 요청(재시도 포함)마다 `data/state.sqlite`의 `api_calls` 표에 KST 날짜별로 센다. 하루·월 한도에 닿으면 받은 데까지 저장하고 다음 실행에 이어받는다.
+  공식 한도: 트렌드 월 5만 건, 뉴스 검색은 문서마다 하루 2.5만 / 월 77.5만(작은 쪽 기준), 키당 50회/초.
+- **과금 멈춤**: NAVER API HUB는 "한시적 무료, 유료 전환 시 사전 공지"다. 401·402·403, 본문에 유료·과금·결제 등의 말이 있는 오류, 429 반복이면 `NaverStop`으로 즉시 멈추고 상태에 오류를 남기며 텔레그램(`logs/alerts.log`)으로 알린다. 이때는 개발·점검 HQ가 사용자에게 보고한다 (비용은 사용자 승인).
+
+### 검색어 트렌드 시점 규칙 (lab이 지킬 것)
+- `ratio`는 **같은 요청 안의 모든 키워드·날짜 중 최댓값 = 100**인 상대값이다. 그래서 전체 기간을 한 번에 받으면 미래 최댓값으로 과거를 정규화하는 미래참조가 된다.
+- 받는 방식: 1월 1일·7월 1일에 시작하는 **1년 고정 창** (반씩 겹침, 2016-01-01부터). 끝난 창은 한 번 받고, 안 끝난 창 중 가장 먼저 시작한 창은 매일 `[창 시작, 어제]`로 다시 받는다(처음엔 창 전체, 그 뒤엔 끝 14일만 저장).
+- 2026-11-18 샘플 확인: 같은 키워드를 다른 창·다른 그룹 구성으로 받아도 **값의 비가 상수**였다(겹친 181일·214일에서 비의 변동 0, 합동/단독 비 23.086 ± 0.0003). 즉 창이 바뀌면 상수배만 달라지고 과거 값이 다시 계산되지 않았다(이후에도 그런지는 매일 갱신 창으로 계속 확인 가능).
+- **날짜 t의 값은 `win_end ≤ t`인 창의 행만 쓴다.** 매일 갱신 창 행은 `win_end` = 수집 전날이므로, `win_end` = D 인 행은 **D+1일 장 시작 전부터** 쓴다 (네이버 집계는 하루 단위, 그날 값은 다음 날 공개).
+- 창을 이을 때: 같은 키워드의 겹치는 날로 비(scale)를 구해 앞 창 기준으로 곱한다(`median(새 창 / 앞 창)`). 이은 시계열의 수준은 첫 창(2016) 최댓값 기준 상수배이므로, **비율 신호(오늘 / 지난 N일 평균)는 안전**하고, 키워드끼리 절대 수준 비교는 같은 요청(`group`) 안에서만 의미가 있다.
+- 한 요청에 키워드 5개를 함께 받아 그중 최댓값이 100이 된다. 검색량이 아주 큰 종목과 같은 그룹이면 작은 종목 값이 작아져(소수 5자리) 0이나 거친 값이 될 수 있다 — `ratio == 0` 행은 '검색량 0'이 아니라 '정밀도 부족'일 수 있다.
+- 키워드는 지금 종목명이다. 사명 변경 전 이름은 받지 않는다 (필요하면 `extra_keywords`로 요청).
+
+### 뉴스 앞으로 수집 규칙
+- 질의: `naver.news.theme_queries`(관련주·테마주·특징주·수혜주·상한가) + `krx_1d` **최근 거래일**에 15% 이상 오른 종목명(상승률 큰 순 60개). `krx_1d`는 KRX가 다음 영업일에 공개하므로 17:00 실행 때 급등 종목은 **전 거래일** 것이다 (그날 종목은 theme 질의의 `상한가`·`특징주` 기사로 잡힌다).
+- 최신순으로 100건씩 넘기다 지난번 마지막 기사 시각보다 오래된 기사가 나오면 멈춘다. API는 질의당 최신 1,100건까지만 주므로 그 안에서 못 따라잡으면 로그에 `누락 가능`이 남는다 (샘플: `특징주` 9시간에 100건, `테마주` 1주에 100건 → 하루 2회면 충분).
+- 시점: `ts`는 네이버가 준 발행 시각(분 단위)이다. 기사는 **`ts` 다음 분봉부터**, 일봉 전략은 장 마감(15:30 KST) 뒤 기사면 다음 거래일부터 쓴다. 제목·요약은 받을 때의 값이다 (`collected_at`).
+- 과거분은 없다 — 2026-11-18부터 쌓인다. 과거 검증(2012~)에는 빅카인즈 쪽을 쓴다.
 
 ## 상태 점검과 알림
 
