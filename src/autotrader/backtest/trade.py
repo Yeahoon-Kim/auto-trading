@@ -37,8 +37,12 @@ lab의 strategy.py는 generate_trades(data, params)로 '봉 t 종가까지 보�
 - heat·보유 종목 수에는 열린 포지션과 같은 봉에 만든 체결 대기 계획을 모두 넣는다 (보수적).
 - 섹터 비중은 섹터 데이터가 없어 0으로 넘긴다. Kelly 승률·손익비는 넘기지 않는다 (위험 비율 그대로).
 - kill_switch는 운영 스위치라 재생에서는 끈다. 데이터 신선도는 판단 시각 = 시세 시각으로 넘겨 통과시킨다.
-- 1회 주문 상한(orders.max_order_value_krw)은 데스크처럼 적용된다 → 결과가 자본 크기에 따라 달라질 수 있다.
-- 계좌 통화가 원화가 아니면 lab.yaml paper.krw_per_unit (고정 환율)으로 주문 상한을 환산한다.
+- 1회 주문 상한(orders.max_order_value_krw)은 재생에서 수량을 자르지 않는다 (사용자 결정 2026-11-18:
+  상한은 운영 안전장치라 paper·live 데스크에만 적용). 대신 "상한이 있었다면 잘렸을 주문"을
+  meta["order_cap"]에 남긴다 — 종목·판단 봉·원래 수량·상한 적용 시 수량 (주문 시점 기준, 미체결 포함).
+  잘렸을 수량은 그 주문만 다시 계산한 값이다 (상한이 heat·현금에 주는 연쇄 효과는 반영하지 않음).
+  → 실제 데스크 결과는 상한이 묶는 만큼 백테스트보다 작은 포지션으로 나온다.
+- 계좌 통화가 원화가 아니면 lab.yaml paper.krw_per_unit (고정 환율)으로 주문 상한을 환산해 기록한다.
 
 비용: 체결 금액 × (수수료 + 슬리피지), 롱 청산(매도) 금액 × 매도세 — 공용 엔진과 같은 Costs.
 선물 펀딩비: panel["funding"]이 있으면 봉 처리(손절·체결) 뒤 남은 포지션에 종가 금액 × 비율을 현금으로 물린다
@@ -93,11 +97,32 @@ class Account:
                    multiplier=float(p.get("multiplier", 1.0)))
 
 
+NO_CAP = 1e18   # 1회 주문 상한을 푸는 값 (runner/paper.py _no_limits와 같은 방식)
+CAP_COLS = ("ts", "symbol", "side", "price", "qty", "notional", "capped_qty", "capped_notional",
+            "would_block", "plan_id")
+
+
 def backtest_risk_cfg(cfg: dict | None = None) -> dict:
-    """risk.yaml을 재생용으로: kill_switch는 끈다 (전략 검증과 무관한 운영 스위치)."""
+    """risk.yaml을 재생용으로: kill_switch는 끄고 (전략 검증과 무관한 운영 스위치),
+    1회 주문 상한도 푼다 (운영 안전장치 — 재생은 잘렸을 주문만 기록, 사용자 결정 2026-11-18)."""
     c = copy.deepcopy(cfg or guards.load_config())
     c["global"]["kill_switch"] = False
+    c["orders"]["max_order_value_krw"] = NO_CAP
     return c
+
+
+def _would_cap(pl: dict, ref: float, t_signal, cap: float, account: Account) -> dict | None:
+    """새 체결 대기 계획이 1회 주문 상한(계좌 통화로 환산한 cap)을 넘으면 잘렸을 수량을 돌려준다.
+    sizing.size와 같은 방식: 상한 수량 = cap / (가격 × 승수)를 lot 단위로 내림."""
+    puv = ref * account.multiplier
+    if not (np.isfinite(puv) and puv > 0) or pl["qty"] * puv <= cap * (1 + 1e-12):
+        return None
+    q = round(np.floor(cap / puv / account.lot + 1e-9) * account.lot, 10)
+    return {"ts": t_signal, "symbol": pl["symbol"], "side": pl["side"], "price": float(ref),
+            "qty": float(pl["qty"]), "notional": float(pl["qty"] * puv),
+            "capped_qty": float(q), "capped_notional": float(q * puv),
+            # 상한이 있었다면 수량 0이나 최소 주문 미달로 진입 못 했을 주문
+            "would_block": bool(q <= 0 or q * puv < account.min_notional), "plan_id": pl.get("plan_id")}
 
 
 def normalize(trades, panel: Panel) -> pd.DataFrame:
@@ -138,7 +163,8 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
         trade_cfg: dict | None = None, risk_cfg: dict | None = None, lab: str = "lab") -> engine.Result:
     """신호표를 [start, end) 구간에서 재생한다. start 이전 판단 봉의 신호는 버린다
     (start 봉 체결에는 start 직전 봉의 신호를 쓴다). 반환: 공용 엔진과 같은 Result
-    (meta["trade_log"]: 거래 기록, meta["blocked"]: 차단 사유별 건수).
+    (meta["trade_log"]: 거래 기록, meta["blocked"]: 차단 사유별 건수,
+    meta["order_cap"]: 1회 주문 상한이 있었다면 잘렸을 주문 — cap_krw, would_cap 건수, would_block 건수, orders 표).
     봉 처리 규칙은 execution/trade_desk.py (paper 데스크와 같은 코드). 여기서는 과거 봉을 넘겨주고
     상장폐지(마지막 가격 다음 봉 강제 청산)와 수익률 집계만 한다."""
     for f in ("open", "high", "low", "close"):
@@ -148,7 +174,11 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
                          krw_per_unit=account.krw_per_unit, lot=account.lot, min_notional=account.min_notional,
                          multiplier=account.multiplier, trade_cfg=trade_cfg)
     spec.check()
-    rcfg = backtest_risk_cfg(risk_cfg)
+    base_cfg = risk_cfg or guards.load_config()
+    cap_krw = float(base_cfg["orders"]["max_order_value_krw"])
+    cap = cap_krw / (1.0 if account.currency == "KRW" else float(account.krw_per_unit))   # 계좌 통화 기준
+    rcfg = backtest_risk_cfg(base_cfg)
+    capped: list[dict] = []
     sig = normalize(trades, panel)
     idx = panel.index
     n = len(idx)
@@ -210,8 +240,14 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
                 book.cash -= pay
                 fund_s[t - lo] = -pay
         V = V_at(t)
+        n_pend = len(book.pending)
         desk.plan(book, spec, by_bar.get(t, []), V, lambda s, t=t: Cf[t, col[s]], idx[t],
                   bar_end.to_pydatetime(), rcfg)
+        for pl in book.pending[n_pend:]:              # 이 봉에서 새로 낸 주문 (사이징 기준가 = 지정가 또는 종가)
+            ref = pl["limit"] if pl["limit"] is not None else Cf[t, col[pl["symbol"]]]
+            c = _would_cap(pl, ref, idx[t], cap, account)
+            if c is not None:
+                capped.append(c)
         if t >= lo:
             i = t - lo
             base = prev_v if abs(prev_v) > 1e-12 else 1.0
@@ -234,7 +270,10 @@ def run(panel: Panel, trades, costs: engine.Costs, account: Account, start=None,
         returns=pd.Series(net, sl).iloc[first:], gross=pd.Series(gross, sl).iloc[first:],
         cost=pd.Series(cost_s, sl).iloc[first:], turnover=pd.Series(turn_s, sl).iloc[first:],
         weights=pd.DataFrame(held, sl, syms).iloc[first:], trades=trades_n, forced_exits=forced, costs=costs,
-        meta={"type": "trade", "trade_log": tl, "blocked": book.blocked})
+        meta={"type": "trade", "trade_log": tl, "blocked": book.blocked,
+              "order_cap": {"cap_krw": cap_krw, "would_cap": len(capped),
+                            "would_block": sum(c["would_block"] for c in capped),
+                            "orders": pd.DataFrame(capped, columns=CAP_COLS)}})
     res.equity = pd.Series(eq_s, sl).iloc[first:]
     res.invested = pd.Series(account.capital, sl).iloc[first:]
     if FR is not None:
@@ -307,6 +346,10 @@ def stats(res: engine.Result) -> dict:
     done = tl[tl["exit_kind"] != "open"] if tl is not None and len(tl) else pd.DataFrame()
     out = {"closed": len(done), "open_at_end": int(len(tl) - len(done)) if tl is not None else 0,
            "blocked": dict(res.meta.get("blocked") or {})}
+    oc = res.meta.get("order_cap")
+    if oc:
+        out["order_cap"] = {"cap_krw": oc["cap_krw"], "would_cap": int(oc["would_cap"]),
+                            "would_block": int(oc["would_block"])}
     if len(done):
         win, lose = done[done["pnl"] > 0], done[done["pnl"] <= 0]
         out |= {"win_rate": float(len(win) / len(done)),
@@ -326,3 +369,6 @@ def save_log(res: engine.Result, folder, name: str) -> None:
     tl = res.meta.get("trade_log")
     if tl is not None and len(tl):
         tl.to_csv(folder / f"{name}_trades.csv", index=False, encoding="utf-8-sig")
+    oc = (res.meta.get("order_cap") or {}).get("orders")
+    if oc is not None and len(oc):
+        oc.to_csv(folder / f"{name}_order_cap.csv", index=False, encoding="utf-8-sig")

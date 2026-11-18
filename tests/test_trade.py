@@ -256,12 +256,68 @@ def test_intraday_hourly_flattens_only_on_last_bar_of_day():
     assert t["exit_ts"] == p.index[3] and t["exit"] == 102.0     # 그날 마지막 봉 종가, 중간 봉에선 안 함
 
 
+CAP_KRW = guards.load_config()["orders"]["max_order_value_krw"]
+
+
+def test_order_cap_not_applied_but_recorded():
+    """1회 주문 상한은 백테스트에서 수량을 자르지 않고, 잘렸을 주문만 기록한다 (사용자 결정 2026-11-18)."""
+    p = _panel([FLAT, (100, 101, 99, 100), (100, 100, 94, 96), FLAT])
+    acct = trade.Account(capital=10 * CAP_KRW)
+    res = trade.run(p, [_sig(p)], NO_COST, acct, trade_cfg=TRADE)    # 기본 risk.yaml 상한 그대로 넘김
+    t = _only(res)
+    want = int(acct.capital * 0.01 / 5)                               # 위험 1% / (100-95)
+    assert want * 100 > CAP_KRW                                       # 상한보다 큰 주문
+    assert t["qty"] == want and t["binding"] == "risk"                # 잘리지 않음
+    oc = res.meta["order_cap"]
+    assert oc["cap_krw"] == CAP_KRW and oc["would_cap"] == 1 and oc["would_block"] == 0
+    row = oc["orders"].iloc[0]
+    assert row["symbol"] == "A" and row["ts"] == p.index[0]
+    assert row["qty"] == want and row["capped_qty"] == CAP_KRW // 100
+    assert trade.stats(res)["order_cap"] == {"cap_krw": CAP_KRW, "would_cap": 1, "would_block": 0}
+
+
+def test_order_under_cap_not_recorded():
+    p = _panel([FLAT, (100, 101, 99, 100), FLAT])
+    res = trade.run(p, [_sig(p)], NO_COST, trade.Account(capital=CAP_KRW), trade_cfg=TRADE)
+    assert _only(res)["qty"] * 100 <= CAP_KRW
+    assert res.meta["order_cap"]["would_cap"] == 0 and res.meta["order_cap"]["orders"].empty
+
+
+def test_order_cap_would_block_when_capped_qty_zero():
+    big = (CAP_KRW * 2, CAP_KRW * 2, CAP_KRW * 2, CAP_KRW * 2)        # 한 주 가격이 상한의 두 배
+    p = _panel([big, big, big])
+    res = trade.run(p, [_sig(p, stop=CAP_KRW * 1.9, target=None)], NO_COST,
+                    trade.Account(capital=CAP_KRW * 100), trade_cfg=TRADE)
+    assert res.trades == 1                                            # 백테스트는 진입
+    oc = res.meta["order_cap"]
+    assert oc["would_cap"] == 1 and oc["would_block"] == 1 and oc["orders"].iloc[0]["capped_qty"] == 0
+
+
+def test_desk_still_applies_order_cap():
+    """paper 데스크(같은 trade_desk.plan)는 상한을 그대로 적용한다 — 백테스트만 푼다."""
+    from autotrader.execution import trade_desk as desk
+    from autotrader.runner.paper import replay_trade
+    p = _panel([FLAT, (100, 101, 99, 100), (100, 100, 94, 96), FLAT])
+    risk = copy.deepcopy(guards.load_config())
+    risk["global"]["kill_switch"] = False
+    sig = trade.normalize([_sig(p)], p)
+    by_bar = {0: list(sig.itertuples(index=False))}
+    book, ev = replay_trade(p, by_bar, 0, NO_COST, risk, desk.DeskSpec(lab="T", market="kr_stock", trade_cfg=TRADE),
+                            capital=10 * CAP_KRW)
+    order = next(e for e in ev if e["kind"] == "order")
+    assert order["qty"] == CAP_KRW // 100 and order["binding"] == "max_order_value"
+    # 넘긴 risk 설정은 바꾸지 않는다
+    assert risk["orders"]["max_order_value_krw"] == CAP_KRW
+
+
 def test_foreign_account_converts_order_cap():
     p = _panel([FLAT, (100, 101, 99, 100), FLAT], market="us_stock")
     acct = trade.Account(capital=100_000, currency="USD", krw_per_unit=1000.0)
     res = trade.run(p, [_sig(p)], NO_COST, acct, trade_cfg=TRADE)    # 기본 risk.yaml: 주문 상한 100만 원
     t = _only(res)
-    assert t["qty"] == 10 and t["binding"] == "max_order_value"     # 100만 원 / 1000 = $1,000 / $100
+    assert t["qty"] == 200 and t["binding"] == "risk"                 # 자르지 않음: $1,000 위험 / $5
+    row = res.meta["order_cap"]["orders"].iloc[0]
+    assert row["capped_qty"] == CAP_KRW / 1000 / 100                  # 100만 원 / 1000 = $1,000 / $100 = 10주
 
 
 def test_foreign_account_without_fx_fails_loudly():
