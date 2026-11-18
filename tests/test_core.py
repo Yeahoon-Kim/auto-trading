@@ -93,6 +93,51 @@ def test_regime_labels():
     assert (out["risk_regime"] == "위험회피").all() and (out["spx_trend"] == "혼조").all()
 
 
+def test_regime_warmup_labels_blank():
+    """200일선·변동성 백분위 워밍업 구간은 값·라벨 모두 비어야 한다 (가짜 '하락'·'보통' 금지)."""
+    idx = pd.date_range("2010-01-01", periods=400, freq="B")
+    px = pd.Series(np.linspace(200, 100, 400), index=idx)  # 계속 하락
+    blk = market._trend_block(px, "spx")
+    assert blk["spx_above_200d"].iloc[:199].isna().all()
+    assert blk["spx_above_200d"].iloc[199:].notna().all()
+    df = blk.copy()
+    for p in ("kospi", "btc"):
+        df[f"{p}_above_200d"], df[f"{p}_ret_20d"], df[f"{p}_rv_pctile"] = np.nan, np.nan, np.nan
+    df["vix_term"], df["vix"], df["hy_spread_chg_20d"] = np.nan, np.nan, np.nan
+    out = market._labels(df)
+    assert out["spx_trend"].iloc[:199].isna().all()
+    assert (out["spx_trend"].iloc[199:] == "하락").all()
+    assert out["spx_vol"][out["spx_rv_pctile"].isna()].isna().all()
+    assert out["btc_trend"].isna().all() and out["btc_vol"].isna().all()
+    # 위험회피 신호: 셀 수 있는 것이 없으면 NaN, 200일선만 있으면 available=1
+    assert out["risk_off_signals"].iloc[:199].isna().all() and out["risk_regime"].iloc[:199].isna().all()
+    assert (out["risk_off_available"].iloc[199:] == 1).all()
+    assert (out["risk_off_signals"].iloc[199:] == 1).all() and (out["risk_regime"].iloc[199:] == "중립").all()
+
+
+def test_regime_risk_off_partial_sources():
+    """HY 스프레드가 없는 날은 그 신호를 '없음'으로 세지 않고 available에서 뺀다."""
+    idx = pd.date_range("2020-01-01", periods=3, tz="UTC")
+    df = pd.DataFrame(index=idx)
+    for p in ("spx", "kospi", "btc"):
+        df[f"{p}_above_200d"], df[f"{p}_ret_20d"], df[f"{p}_rv_pctile"] = False, -0.1, 0.9
+    df["vix_term"], df["vix"] = 1.2, 30.0
+    df["hy_spread_chg_20d"] = [np.nan, 1.0, 0.0]
+    out = market._labels(df)
+    assert out["risk_off_available"].tolist() == [3, 4, 4]
+    assert out["risk_off_signals"].tolist() == [3, 4, 3]
+    assert (out["risk_regime"] == "위험회피").all()
+    assert "3/4, 셀 수 있는 신호 3개" not in market.brief(out.assign(
+        spx_observed=True, kospi_observed=True, btc_observed=True, spx_close=1.0, kospi_close=1.0,
+        btc_close=1.0, spx_rv_20d=0.1, kospi_rv_20d=0.1, btc_rv_20d=0.1, hy_spread=3.0, t10y2y=0.1,
+        usdkrw=1300.0, usdkrw_chg_20d=0.0))
+    first = market.brief(out.iloc[:1].assign(
+        spx_observed=True, kospi_observed=True, btc_observed=True, spx_close=1.0, kospi_close=1.0,
+        btc_close=1.0, spx_rv_20d=0.1, kospi_rv_20d=0.1, btc_rv_20d=0.1, hy_spread=np.nan, t10y2y=0.1,
+        usdkrw=1300.0, usdkrw_chg_20d=0.0))
+    assert "위험회피 신호 3/4, 셀 수 있는 신호 3개" in first
+
+
 def test_notify_without_token_logs_only(tmp_path, monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.setattr(notify, "ALERT_LOG", tmp_path / "alerts.log")
