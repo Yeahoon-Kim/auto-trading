@@ -5,7 +5,7 @@
 #   사용: powershell -ExecutionPolicy Bypass -File scripts\collect_all.ps1
 #   일부만: ... -File scripts\collect_all.ps1 -Sources binance,kr
 
-param([string[]]$Sources = @("binance", "upbit", "kr", "us", "us-sip", "news", "macro", "kr-public", "dividends", "edgar", "us-splits"))
+param([string[]]$Sources = @("binance", "upbit", "kr", "us", "us-sip", "news", "macro", "kr-public", "dividends", "edgar", "us-splits", "naver-trend", "naver-news"))
 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root

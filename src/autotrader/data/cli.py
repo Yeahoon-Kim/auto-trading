@@ -11,6 +11,9 @@
     uv run python -m autotrader.data.cli collect dividends   # 배당: DART 사업보고서(KR), Alpaca(US)
     uv run python -m autotrader.data.cli collect edgar       # US 재무: SEC EDGAR companyfacts (SEC_USER_AGENT 필요)
     uv run python -m autotrader.data.cli collect us-splits   # US 분할 이력 (Yahoo, 발표일은 Alpaca 2020~)
+    uv run python -m autotrader.data.cli collect naver-trend # 네이버 검색어 트렌드 2016~ (NAVER API HUB 키 필요)
+    uv run python -m autotrader.data.cli collect naver-news  # 네이버 뉴스 검색, 지금부터 쌓기 (같은 키)
+    uv run python -m autotrader.data.cli naver-gaps          # 네이버 수집이 빠진 날 (--dataset naver_trend, --since)
     uv run python -m autotrader.data.cli collect binance --symbols BTCUSDT ETHUSDT
     uv run python -m autotrader.data.cli status
 
@@ -33,9 +36,13 @@ def main() -> None:
     c = sub.add_parser("collect")
     c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
                                       "us-minute", "us-sip", "news", "macro", "legacy", "kr-public",
-                                      "dividends", "edgar", "us-splits"])
+                                      "dividends", "edgar", "us-splits", "naver-trend", "naver-news"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
+    g = sub.add_parser("naver-gaps", help="네이버 수집 기록에서 빠진 날 찾기")
+    g.add_argument("--dataset", default="naver_news_live", choices=["naver_news_live", "naver_trend"])
+    g.add_argument("--since", help="KST 날짜 YYYY-MM-DD (기본: 첫 수집일)")
+    g.add_argument("--all", action="store_true", help="문제없는 날도 보이기")
     h = sub.add_parser("health")
     h.add_argument("--notify", action="store_true", help="문제가 있으면 텔레그램으로 알림")
     a = p.parse_args()
@@ -44,6 +51,15 @@ def main() -> None:
         pd.set_option("display.width", 200)
         print(store.summary().to_string(index=False))
         return
+
+    if a.cmd == "naver-gaps":
+        from .collectors import naver
+        df = naver.gaps(a.dataset, a.since)
+        bad = df[df["problem"] != ""]
+        print((df if a.all else bad).to_string(index=False) if len(df if a.all else bad) else "빠진 날 없음")
+        print(f"{a.dataset}: {len(df)}일 중 문제 {len(bad)}일"
+              f" (거래일 문제 {int((bad['trading_day'] != False).sum())}일)")
+        return 1 if (bad["trading_day"] != False).any() else 0
 
     from ..monitoring import health, notify
 
@@ -63,6 +79,7 @@ def main() -> None:
         kr_stock,
         legacy_db,
         macro,
+        naver,
         news,
         upbit,
         us_alpaca,
@@ -87,6 +104,10 @@ def main() -> None:
             dividends.run(a.symbols)
         elif src == "edgar":
             edgar.run(a.symbols)
+        elif src == "naver-trend":
+            naver.run_trend(a.symbols)
+        elif src == "naver-news":
+            naver.run_news(a.symbols)
         elif src.startswith("kr"):
             kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
         elif src == "news":
