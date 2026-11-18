@@ -27,7 +27,7 @@ import pandas as pd
 import yaml
 
 from . import benchmark, engine, trade
-from .data import Panel, check_dividend_causality, check_fin_causality, dev_end, load
+from .data import Panel, check_dividend_causality, check_fin_causality, check_mcap_causality, dev_end, load
 
 REGIME_COL = {"kr_stock": "kospi_trend", "us_stock": "spx_trend",
               "crypto_spot": "btc_trend", "crypto_futures": "btc_trend"}
@@ -189,7 +189,9 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
     causal = R.causality(params)
     causal["dividend_fields"] = check_dividend_causality(panel)   # 배당 필드 자체의 시점 (필드가 없으면 통과)
     causal["fin_fields"] = check_fin_causality(panel)             # 재무 필드 자체의 시점 (필드가 없으면 통과)
-    causal["passed"] = causal["passed"] and causal["dividend_fields"]["passed"] and causal["fin_fields"]["passed"]
+    causal["mcap_fields"] = check_mcap_causality(panel)           # US 시가총액 필드 자체의 시점 (필드가 없으면 통과)
+    causal["passed"] = (causal["passed"] and causal["dividend_fields"]["passed"] and causal["fin_fields"]["passed"]
+                        and causal["mcap_fields"]["passed"])
     base = wfrun(params)
     test = base["test"]
     rf = _rf(panel, test.returns.index)
@@ -378,17 +380,21 @@ def report(s: dict) -> str:
         elif cov.get("rows"):
             lines.append(f"- 실행 시점 배당 데이터 범위: {cov['rows']:,}건, 배당락 {cov['first']}~{cov['last']}")
     lines += _fin_lines(s["data"])
+    lines += _mcap_lines(s["data"])
     lines += _funding_lines(s["data"])
     if "causality" in s:
         c = s["causality"]
         df = c.get("dividend_fields") or {}
         ff = c.get("fin_fields") or {}
+        mf = c.get("mcap_fields") or {}
         lines.append(f"- 미래참조 자동 검사: {'통과' if c['passed'] else '**실패**'} "
                      f"(데이터를 {len(c['cuts'])}곳에서 잘라 다시 계산한 신호 비교"
                      + (f"; 배당 필드 {', '.join(df['fields'])} 재구성 비교 "
                         f"{'통과' if df['passed'] else '**실패**'}" if df.get("fields") else "")
                      + (f"; 재무 필드 {', '.join(ff['fields'])} 재구성 비교 "
-                        f"{'통과' if ff['passed'] else '**실패**'}" if ff.get("fields") else "") + ")")
+                        f"{'통과' if ff['passed'] else '**실패**'}" if ff.get("fields") else "")
+                     + (f"; 시가총액 필드 {', '.join(mf['fields'])} 재구성 비교 "
+                        f"{'통과' if mf['passed'] else '**실패**'}" if mf.get("fields") else "") + ")")
         lines.append(f"- 가설 커밋 상태: {s.get('hypothesis_committed')}")
     lines += ["", "## 결과 (비용 포함)",
               f"- 총수익 {_fmt(t.get('total_return'))}, CAGR {_fmt(t.get('cagr'))}, Sharpe {_fmt(t.get('sharpe'))} "
@@ -488,6 +494,36 @@ def _fin_lines(d: dict) -> list[str]:
         out.append(f"- {v['eps']}")
     if v.get("note"):
         out.append(f"- 주의: {v['note']}")
+    return out
+
+
+def _mcap_lines(d: dict) -> list[str]:
+    """US 시가총액 필드를 쓴 lab: 시점 규칙, 원천 범위, 결측률, 다중 클래스, 단위 이상치, 알려진 한계."""
+    if not d.get("mcap_fields"):
+        return []
+    v = d.get("mcap_data") or {}
+    out = [f"- 시가총액 필드 시점: {d['mcap_fields']}"]
+    if not v.get("events"):
+        out.append("- 실행 시점 주식수 데이터: **없음** (edgar_facts 주식수 항목 없음 → market_cap 전부 비어 있음)")
+    else:
+        fl = v.get("flags") or {}
+        miss = v.get("missing")
+        out.append(f"- 실행 시점 주식수 데이터: 공시 {v['events']:,}건(공시일 {v['first_filed']}~{v['last_filed']}), "
+                   f"원천 행 edgar_facts {v['facts_rows']:,}·클래스별 {v['class_rows']:,}·분할 이력 {v['split_rows']:,}, "
+                   f"버린 공시 {fl.get('dropped', 0):,}·단위 수정 {fl.get('scale_fixed', 0):,}건"
+                   + (f". 결측률(가격 있는 칸 기준) {miss:.1%}" if miss is not None else ""))
+        lack = v.get("symbols_without_shares") or []
+        if lack:
+            out.append(f"- 주식수가 한 번도 없는 종목 {len(lack)}개: {', '.join(lack[:15])}")
+        if v.get("unit_outlier_symbols"):
+            out.append(f"- 단위 이상치(전 기간 중앙값의 10배↑/↓ 날 있음) 종목: {', '.join(v['unit_outlier_symbols'][:15])}")
+        mc = v.get("multi_class") or {}
+        if mc:
+            out.append(f"- 한 회사 여러 종목(cik 같음, 둘 다 회사 전체 시총): "
+                       + "; ".join("·".join(s) for s in list(mc.values())[:10]) + " → 순위는 cik로 묶어 하나만")
+    if v.get("warning"):
+        out.append(f"- **경고: {v['warning']}**")
+    out += [f"- 시가총액 한계: {x}" for x in v.get("limits") or []]
     return out
 
 

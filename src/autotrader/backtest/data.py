@@ -15,6 +15,9 @@
 - 재무 필드 (kr_stock, fields에 적으면): dart_fin 분기 재무. 재무상태 FIN_BS(equity, total_liabilities …)는 최근 분기말 값,
               손익 FIN_TTM(net_income_ttm …)은 최근 4개 분기 3개월 값 합. 공개일 다음 거래일부터 보인다 (fin_reports()).
               check_fin_causality()가 cut 전에 공개된 보고서만으로 다시 만든 값과 비교한다.
+- 시가총액 필드 (us_stock, fields에 market_cap·shares·cik): us_1d 원본 종가 × 분할 보정 주식수 (data.shares).
+              공시일 다음 거래일부터. 회사 단위라 GOOG·GOOGL은 둘 다 회사 전체 시총 → cik로 묶어 하나만 고른다.
+              check_mcap_causality()가 cut 전 공시만으로 다시 만든 값과 비교한다.
 - crypto_spot / crypto_futures : binance_spot_1m / binance_um_1m을 timeframe(1d, 1h …)으로 묶음. UTC 기준.
               선물은 panel["funding"](봉 안에 정산된 펀딩비율 합, binance_um_funding)을 같이 주고 엔진이 손익에 반영한다.
 
@@ -51,6 +54,8 @@ class Panel(dict):
         self.div_basis: pd.DataFrame | None = None   # 배당 필드를 다시 만드는 재료 (check_dividend_causality용)
         self.fin_reports: pd.DataFrame | None = None  # 재무 필드 원천 보고서 표 (check_fin_causality용)
         self.fin_basis: pd.DataFrame | None = None    # 재무 필드를 붙인 (date, symbol) 행
+        self.mcap_source: dict | None = None          # US 시가총액 원천 (check_mcap_causality용)
+        self.mcap_basis: pd.DataFrame | None = None   # US 시가총액을 붙인 (date, symbol, ts, _rc) 행
 
     def __getattr__(self, name):
         try:
@@ -167,17 +172,32 @@ def load(market: str, symbols: list[str] | str | None = None, start=None, end=No
         fin_basis = long[["date", "symbol", *[c for c in ("_sh", "_f") if c in long and "eps_ttm" in want_fin]]]
         fin_basis = fin_basis.reset_index(drop=True)
         long = long.merge(fin_build(market, fin_basis, rep_fin, want_fin, fin_timing), on=["date", "symbol"], how="left")
+    want_mcap = [f for f in US_MCAP_FIELDS if f in fields] if market == "us_stock" else []
+    mcap_src = mcap_basis = None
+    if want_mcap:
+        mcap_src = us_mcap_source(long["symbol"].unique())
+        ev = _mcap_events(mcap_src)
+        mcap_basis = long[["date", "symbol", "ts", "_rc"]].reset_index(drop=True)
+        vals = us_mcap_fields(mcap_basis, ev)
+        long = long.drop(columns=[c for c in US_MCAP_FIELDS if c in long]).merge(vals, on=["date", "symbol"], how="left")
+        meta["mcap_fields"] = US_MCAP_TIMING
+        meta["mcap_data"] = us_mcap_coverage(mcap_src, ev, vals)
     frames = {f: long.pivot(index="date", columns="symbol", values=f).sort_index() for f in fields if f in long}
     if want_fin:   # 결측률: 가격이 있는 칸 중 재무 값이 비어 있는 비율
         has_px = frames["close"].notna()
         meta["fin_data"]["missing"] = {f: round(float(frames[f].isna()[has_px].sum().sum() / max(has_px.sum().sum(), 1)), 4)
                                        for f in want_fin}
+    if want_mcap:
+        has_px = frames["close"].notna()
+        meta["mcap_data"]["missing"] = round(float(frames["market_cap"].isna()[has_px].sum().sum()
+                                                   / max(has_px.sum().sum(), 1)), 4) if "market_cap" in frames else None
     meta |= {"dev_end": str(cut.date()), "lockbox": lockbox, "survivorship": SURVIVORSHIP[market],
              "start": str(frames["close"].index[0]), "end": str(frames["close"].index[-1])}
     panel = Panel(frames, market, timeframe, meta)
     panel.div_basis = basis
     panel.fin_reports = rep_fin
     panel.fin_basis = fin_basis
+    panel.mcap_source, panel.mcap_basis = mcap_src, mcap_basis
     return panel
 
 
@@ -916,7 +936,7 @@ US_FIN_TIMING = {
     "last": "edgar_facts 기간마다 그날까지 공시된 가장 최신 값(10-K/A·10-Q/A 정정, 다음 해 비교 재무제표의 재작성 값)을 "
             "그 공시일 다음 거래일부터 바꿔 쓴다. 같은 공시에 태그가 여럿이면 tag_rank가 작은 것. 4분기 = 연간 − 9개월 누계",
 }
-US_FIN_NOTE = ("재무 값은 USD. us_1d 가격은 과거까지 분할 반영된 값이고 분할 이력이 없어 주당 값(EPS)·시가총액은 만들지 않는다. "
+US_FIN_NOTE = ("재무 값은 USD. 주당 값(EPS)은 아직 만들지 않는다 (시가총액은 market_cap 필드: 분할 보정 주식수 × 종가). "
                "edgar_facts는 현재 구성종목만 → 생존편향 있음")
 QDAYS = 365.25 / 4
 
@@ -1025,6 +1045,116 @@ def us_fin_coverage(facts: pd.DataFrame, timing: str, symbols) -> dict:
             "first": str(facts["filed_d"].min().date()), "last": str(facts["filed_d"].max().date()),
             "amendments": int(facts["form"].astype(str).str.endswith("/A").sum()),
             "symbols_without_facts": sorted(syms - set(facts["symbol"]))[:30], "note": US_FIN_NOTE}
+
+
+# ── 시가총액: 분할 보정 주식수 (us_stock) ──
+US_MCAP_FIELDS = ("market_cap", "shares", "cik")
+US_MCAP_TIMING = (
+    "market_cap = us_1d 원본 종가(분할 반영·배당 미반영, USD) × 분할 보정 주식수(data.shares.daily_shares, 같은 분할 기준). "
+    "주식수는 EDGAR 공시일 다음 거래일부터, 기준일(asof)이 us_shares.max_age_days(400일)보다 오래되면 NaN. "
+    "회사 단위: 한 회사 종목이 여럿(GOOG·GOOGL 등)이면 둘 다 회사 전체 시총 → 순위는 cik로 묶어 하나만 (엔진은 빼지 않음). "
+    "shares = 회사 전체 주식수를 그 종목 주식으로 환산한 값(close와 같은 분할 기준). currency=KRW여도 USD")
+US_MCAP_LIMITS = (
+    "V: B·C주를 빼서 시총이 약 5~20% 작다",
+    "교환비가 1:1 아닌 합병 종목(LIN·DD·BKR·VTRS·AMCR·SW·SKYD·TKO 등)은 합병 전 기간이 비어 있다",
+    "us_1d·edgar_facts는 현재 구성종목만 → 생존편향 (과거에 컸다가 빠진 회사가 순위에 없다)",
+    "2011-06 이전 XBRL 없는 소형사(첫 1~1.5년)·외국 회사(20-F)는 비어 있다",
+    "데이터 점검(shares_check)에서 단위 이상치가 남은 종목: BE(상장 직후 주식수), EXE(파산 재편 전 옛 주식)",
+)
+
+
+def us_mcap_source(symbols) -> dict:
+    """시가총액 원천: edgar_facts 주식수 항목, edgar_class_shares, us_splits, us_1d 전체 기간 종가(공시일 시총 점검용).
+    미래참조 검사가 cut 전 공시만으로 다시 만들 수 있게 원천 그대로 둔다."""
+    from ..data import shares as sh
+    syms = sorted(set(symbols))
+    folder = store.DATA_DIR / "edgar_facts" / "ALL"
+    facts = pd.DataFrame()
+    if folder.exists() and any(folder.glob("*.parquet")):
+        facts = store.query(f"SELECT symbol, cik, tag, unit, start, \"end\", val, accn, form, filed FROM "
+                            f"'{folder.as_posix()}/*.parquet' WHERE field LIKE 'shares%' AND {_sym_filter(syms)}")
+    return {"facts": facts, "class_shares": store.read("edgar_class_shares", "ALL"),
+            "splits": store.read("us_splits", "ALL"), "bars": sh._bars(syms)}
+
+
+def _mcap_events(src: dict, asof=None) -> pd.DataFrame:
+    """공시별 채택 주식수 (shares.share_events). asof: 그날 전에 공시된 것만, 공시일 시총 점검 가격도 그날까지만.
+    분할 이력은 자르지 않는다 — us_1d 가격이 오늘 기준으로 모든 분할을 반영해 저장돼 있어 배수가 가격과 상쇄된다."""
+    from ..data import shares as sh
+    facts, cls, bars = src["facts"], src["class_shares"], src["bars"]
+    if asof is not None:
+        a, tz = pd.Timestamp(asof), TZ["us_stock"]
+        before = lambda d, c: d[_local_date(pd.to_datetime(d[c], utc=True), tz) < a] if len(d) else d
+        facts, cls = before(facts, "filed"), before(cls, "filed")
+        bars = bars[_local_date(pd.to_datetime(bars["ts"], utc=True), tz) <= a] if len(bars) else bars
+    if facts is None or facts.empty:
+        return pd.DataFrame()
+    return sh.share_events(facts=facts, class_shares=cls, splits=src["splits"], bars=bars)
+
+
+def us_mcap_fields(basis: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    """basis(date, symbol, ts, _rc = us_1d 원본 종가)마다 그날 알 수 있는 shares, market_cap, cik."""
+    from ..data import shares as sh
+    b = basis[["date", "symbol", "ts"]].assign(close=basis["_rc"].to_numpy())
+    if events is None or events.empty:
+        return b[["date", "symbol"]].assign(shares=np.nan, market_cap=np.nan, cik=np.nan)
+    # 같은 날 공시가 둘 이상이면(10-Q와 옛 기준일 8-K 등) 기준일(asof)이 가장 최근인 것 하나만.
+    # 그대로 두면 merge_asof가 정렬 순서에 따라 아무거나 골라 결과가 입력 크기에 따라 달라진다 (KO 2016-10-27)
+    ev = events[events["flag"] != "dropped"]
+    fday = _local_date(pd.to_datetime(ev["filed"], utc=True), TZ["us_stock"])
+    ev = ev.assign(_fd=fday).sort_values(["symbol", "_fd", "asof", "accn"])
+    ev = ev.drop_duplicates(["symbol", "_fd"], keep="last").drop(columns="_fd")
+    ev.attrs = dict(events.attrs)
+    d = sh.daily_shares(events=ev, bars=b[["ts", "symbol", "close"]])
+    out = b[["date", "symbol", "ts"]].merge(d[["ts", "symbol", "shares", "market_cap", "cik"]],
+                                            on=["ts", "symbol"], how="left")
+    out["cik"] = out["cik"].astype(float)
+    return out[["date", "symbol", "shares", "market_cap", "cik"]]
+
+
+def us_mcap_coverage(src: dict, events: pd.DataFrame, vals: pd.DataFrame) -> dict:
+    """실행 시점 시가총액 원천 범위와 품질 (데이터 보강·수집으로 결과가 바뀌므로 report에 남긴다)."""
+    from ..data import shares as sh
+    out = {"timing": US_MCAP_TIMING, "limits": list(US_MCAP_LIMITS),
+           "facts_rows": len(src["facts"]), "class_rows": len(src["class_shares"]), "split_rows": len(src["splits"])}
+    if not len(src["splits"]):
+        out["warning"] = "us_splits 없음 → 분할한 종목은 분할 전 시총이 분할 비율만큼 작게 나온다 (데이터 수집 전)"
+    if events is None or events.empty:
+        return out | {"events": 0}
+    out |= {"events": len(events), "first_filed": str(pd.Timestamp(events["filed"].min()).date()),
+            "last_filed": str(pd.Timestamp(events["filed"].max()).date()),
+            "flags": {str(k): int(v) for k, v in events["flag"].value_counts().items()}}
+    v = vals.dropna(subset=["market_cap"])
+    if len(v):
+        q = sh.quality(events, vals.rename(columns={"date": "ts"}))
+        out["unit_outlier_symbols"] = sorted(q.loc[q["unit_outlier"] > 0, "symbol"])
+    g = vals.dropna(subset=["cik"]).groupby("cik")["symbol"].unique()
+    out["multi_class"] = {str(int(k)): sorted(s) for k, s in g.items() if len(s) > 1}
+    out["symbols_without_shares"] = sorted(set(vals["symbol"]) - set(v["symbol"]))[:30]
+    return out
+
+
+def check_mcap_causality(panel: Panel, n_cuts: int = 3, tol: float = 1e-9) -> dict:
+    """시가총액 필드 미래참조 검사: cut 전에 공시된 주식수(와 그때까지 가격)만으로 공시별 채택값을 다시 고르고
+    cut까지 봉에 붙인 값이 전체로 만든 panel 값과 같아야 한다 (공시 당일부터 보이게 하거나, 뒤 공시가
+    앞 채택값을 바꾸면 어긋난다)."""
+    fields = [f for f in US_MCAP_FIELDS if f in panel]
+    out = {"passed": True, "fields": fields, "cuts": []}
+    if not fields or panel.mcap_source is None or panel.mcap_basis is None:
+        return out
+    idx, basis = panel.index, panel.mcap_basis
+    for q in np.linspace(0.4, 0.85, n_cuts):
+        cut = idx[int(len(idx) * q)]
+        part = us_mcap_fields(basis[basis["date"] <= cut], _mcap_events(panel.mcap_source, asof=cut))
+        bad = 0
+        for f in fields:
+            p = part.pivot(index="date", columns="symbol", values=f)
+            full = panel[f].reindex(index=p.index, columns=p.columns).to_numpy(dtype=float)
+            same = np.isclose(full, p.to_numpy(dtype=float), rtol=tol, atol=tol, equal_nan=True)
+            bad += int((~same).any(axis=1).sum())
+        out["cuts"].append({"cut": str(cut), "mismatch_bars": bad})
+        out["passed"] &= bad == 0
+    return out
 
 
 def fin_build(market: str, basis: pd.DataFrame, src: pd.DataFrame, fields, timing: str, asof=None) -> pd.DataFrame:
