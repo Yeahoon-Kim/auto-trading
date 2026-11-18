@@ -68,6 +68,7 @@ def main(out: Path) -> None:
            "", "| 연도 | 전략 | 대리 보유 | KOSPI |", "|---|---|---|---|"]
     md += [f"| {y} | {v['strategy']:.1%} | {v['proxy_hold']:.1%} | {v['kospi']:.1%} |" for y, v in rep["yearly"].items()]
     (out / "baseline.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     print("\n".join(md))
 
 
