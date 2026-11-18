@@ -66,6 +66,7 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 | `dart_major_holders` (symbol=ALL) | **기업 연고표 — 최대주주 현황** 원문: `nm`(주주명), `relate`(관계: 최대주주 본인·특수관계인·계열회사 임원 등), `stock_knd`, 기초·기말 주식 수·지분율, `rm`. 1행 = 주주 1명 × 주식 종류 | OpenDART `hyslrSttus` | 같음 | 같음 |
 | `dart_company` (symbol=ALL) | **기업개황**: **`adres`(본사 주소)**, `ceo_nm`, `induty_code`(업종), `est_dt`(설립일), `acc_mt`(결산월), `jurir_no`·`bizr_no`, `hm_url` 등 응답 그대로 + `status`. `ts` = 받은 날. **현재 값만 있다** (아래 한계 참고) | OpenDART `company` | `dart_fin`과 같은 종목 | 회사당 1회 + 90일마다 다시 받아 변경을 쌓음 (`dividends.profile_company_refresh_days`) |
 | `dart_profile_calls` (symbol=ALL) | 연고표 진행 기록: (`api`, `corp_code`, `bsns_year`)당 `status`('000' 있음·'013' 없음), `n_rows`, `rcept_no`, `fetched`. 이어받기·'없음' 재확인용 | — | — | 매일 |
+| `dart_business` (symbol=ALL) | **사업보고서 'II. 사업의 내용' 본문 평문**: `business_text`(절 전체, 태그 제거 — 표 칸은 탭, 줄·문단은 줄바꿈), `products_text`('주요 제품' 소절이 따로 있으면 그 부분, 대개 2020년 무렵 이후 서식), `rcept_no`(**최초 접수본**), `first_filed`(최초 접수일), `original_found`, `last_rcept_no`·`correction_rcept_nos`·`n_filings`(정정본 접수번호만), `status`('ok'·'no_section'·DART 오류 코드·'parse_error'), `n_chars`, `encoding`, `zip_bytes`, `collected_at`. 한 행 = 회사 × 사업보고서 기간(`period` 결산 'YYYY.MM'), `ts` = 결산일. 키 = (`corp_code`, `period`) | OpenDART 공시서류원본파일 `document.xml` (접수번호당 zip 1개) | 결산 연도 2014~ 사업보고서 (`dart_periodic_filings`·`dart_disclosures` 기준), `dart_fin`과 같은 종목(상장폐지 포함). 2026-11-18 기준 약 2.83만 건(2025 사업연도 2,791건) | 매일 (`dividends` 예산의 연고표 다음 몫으로 백필, 최근 사업연도부터) |
 | `edgar_facts` (symbol=ALL) | 미국 **재무 사실(fact) 긴 표**: `field`(eps_diluted·eps_basic·net_income·revenue·operating_income·equity·shares_outstanding·shares_diluted_wavg·shares_basic_wavg), `tag`·`tag_rank`(같은 항목의 us-gaap 태그 우선순위), `unit`, `start`(기간 시작, 시점 항목은 NaT)·`end`, `val`, `accn`(접수번호), `fy`·`fp`, `form`(10-K·10-Q·10-K/A·8-K…), **`filed`(공시일)**, `frame`. `ts` = 기간 끝. 같은 기간 값이 다음 공시(비교 재무제표·정정)에 다시 나오면 공시마다 행이 따로 있다 | SEC EDGAR XBRL companyfacts (키 없음, **`SEC_USER_AGENT` 필요**) | us_1d 유니버스(S&P500+NASDAQ100 **현재 구성종목**), XBRL 2009~ (그 전 기간은 이후 공시의 비교 값만) | 매일 (SEC 일별 색인에서 10-K·10-Q(정정 포함)를 낸 회사 + 30일 지난 회사만 다시 받음) |
 | `edgar_companies` (symbol=ALL) | 종목 → CIK(SEC `company_tickers.json`), 회사명, 마지막 companyfacts 수집 시각(`ts`), 사실 수, `fields_v`(받을 때의 항목 버전) | SEC | 같음 | 매일 |
 | `edgar_class_shares` (symbol=ALL) | **클래스별 표지 주식수**: `cik`, `accn`, `form`, `filed`, `member`(`축=클래스`, 차원 없는 회사 전체 값은 빈 문자열, 표지 주식수가 없는 공시는 `∅`), `asof`(표지 기준일), `val`. `ts` = asof | SEC 공시별 `{접수번호}-xbrl.zip`의 표지(dei) | companyfacts에 차원 없는 주식수가 있는 10-K·10-Q가 50% 미만인 CIK(2026-11-17 기준 STZ·ERIE·BRK·V·CVNA·BKR) + `edgar.class_force_ciks`, 2009-06~ | 매일 (새 공시만, 실행당 1,500건 상한) |
@@ -120,9 +121,17 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   - **`dart_company`(본사 주소 등)는 현재 값만 준다 — 과거 이력이 없다.** 2026-11 수집분을 과거 구간에 그대로 쓰면, 그 사이 본사를 옮긴 회사는 미래참조다. 과거 구간 소재지 연고에는 위험을 적고 쓰거나 다른 근거(사업보고서 본문 등)로 확인한다. 90일마다 다시 받으므로 수집 시작 뒤 변경은 `ts`(받은 날) 기준으로 쓸 수 있다.
   - 대상: 사업보고서가 있다고 확인된 (회사, 사업연도)만 묻는다 (`dart_dividend` 값 있음 ∪ `first_filed()`의 사업보고서). 2026-11-18 기준 26,282쌍(2015 2,013 ~ 2025 2,761) × 3종 + 기업개황 3,184 ≈ **8.2만 호출**.
   - 데이터가 없다는 답(013)은 사업보고서 마감·지연 제출을 넉넉히 본 다음 해 7월 이후에 받았으면 끝, 그 전이면 14일 뒤 다시 묻는다.
+- **사업의 내용 본문** (`dart_business`, 수집기 `collectors/dart_business.py`, L004 요청):
+  - **시점 규칙: 최초 접수일(`first_filed`) 다음 날부터 쓴다.** 그 전에는 직전 사업연도 행. 텍스트는 최초 접수본에서 뽑으므로 정정에 따른 미래참조가 없다 (연고표·배당과 달리). `original_found=False`(약 2%)는 최초 접수본이 목록에 안 보여 가장 이른 정정본을 쓴 행이다 — 그 접수일 기준이라 시점은 보수적이지만 텍스트가 정정 후 내용일 수 있다.
+  - 절 찾기: 문서 XML의 `TITLE` 중 'II. 사업의 내용'부터 다음 큰 절('III. …') 전까지. 목차 표의 같은 글자는 TITLE이 아니라 잡히지 않는다. 절이 없으면 `status='no_section'`.
+  - 인코딩: 머리말은 utf-8이라 적혀 있지만 옛 문서는 실제 EUC-KR(CP949)이다 (표본: 2014~2021 보고서 cp949, 2025 보고서 utf-8). utf-8(엄격) → cp949 순서로 풀고 `encoding`에 남긴다.
+  - 정리: DART 편집기 줄바꿈 `&cr;`는 줄바꿈으로, 편집기 표시 줄(`◆click◆…`, `…#*_….dsl`)은 지운다. 그 밖은 원문 그대로 — 키워드 사전·매칭은 lab에서.
+  - 주의: 연혁·경영진단에만 나오는 사업 언급은 이 절에 없다 (예: 모나리자 2018 사업보고서의 '마스크' 2회는 'I. 회사의 개요'(연혁)와 'IV. 이사의 경영진단'에 있고 'II. 사업의 내용'에는 없다).
+  - 크기(2026-11-18 10건 표본): zip 평균 약 340KB(124~780KB, 저장 안 함), 본문 5천~3.8만 자, parquet(zstd) 약 18KB/건 → 전체 약 0.5GB. 내려받기 0.1~0.3초/건.
+  - '없음'·오류 상태(013·014·parse_error 등)는 14일 뒤 다시 받는다. 목록이 늦게 채워져 최초 접수본 접수번호가 바뀌면 다시 받는다.
 - **DART 호출 예산 배분** (`collect dividends`, `dividends.dart_max_calls` 실행당 8천 하나를 나눠 쓴다. 새 상한 없음):
-  1) `dart_periodic_filings`(최초 접수일, 회사당 1회) → 2) `dart_dividend`(배당) → 3) 기업 연고표(남은 예산 전부: 기업개황 → 보고서 3종, 최근 사업연도부터 회사마다 3종을 이어서).
-  앞 단계가 먼저 쓰고, 뒤 단계는 남은 만큼만 쓴다. 1)·2)는 2026-11-17에 백필이 끝나 지금은 새 보고서만 확인한다(실행당 수십 회) → 연고표가 거의 8천을 쓴다.
+  1) `dart_periodic_filings`(최초 접수일, 회사당 1회) → 2) `dart_dividend`(배당) → 3) 기업 연고표(기업개황 → 보고서 3종, 최근 사업연도부터 회사마다 3종을 이어서) → 4) `dart_business`(사업의 내용 본문, 최근 사업연도부터. 문서 1개 = 호출 1회).
+  앞 단계가 먼저 쓰고, 뒤 단계는 남은 만큼만 쓴다. 1)·2)는 2026-11-17에 백필이 끝나 지금은 새 보고서만 확인한다(실행당 수십 회) → 연고표가 거의 8천을 쓰고, 연고표 백필(약 8.2만)이 끝난 뒤부터 `dart_business`가 남은 몫을 쓴다.
   DART 020(하루 한도 초과)을 받으면 그 단계에서 멈추고 뒤 단계도 쉬며, 다음 실행이 받은 것을 건너뛰고 이어받는다.
   같은 키를 `kr-public`(`dart_disclosures`·`dart_fin`·`dart_fin_owner` 실행당 8천)도 쓴다.
 - **배당 데이터 시점** (검토: `docs/research/2026-11-16-dividend-data-sources.md`):
