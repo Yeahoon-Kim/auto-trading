@@ -22,6 +22,7 @@
       "다음 날부터 알 수 있음"으로 써도 미래참조는 없지만, 발표 이벤트 전략의 공시일로 쓰면 안 된다.
       2020~21에는 뮤추얼펀드(5글자 티커)가 많이 섞여 있다.
 - dart_executives·dart_investments·dart_major_holders·dart_company: 기업 연고표 (dart_profile.py). 같은 DART 예산의 남은 몫으로 백필.
+- dart_business: 사업보고서 'II. 사업의 내용' 본문 평문 (dart_business.py). 연고표 다음 순서로 남은 몫.
 키: DART_API_KEY, ALPACA_API_KEY/ALPACA_SECRET_KEY (없으면 해당 소스는 건너뛴다).
 """
 
@@ -511,10 +512,13 @@ def run(symbols: list[str] | None = None) -> None:
         return
     # 오래 걸리고 한도 소진형이라 마지막에. 실행당 호출 상한 dart_max_calls 하나를 아래 순서로 나눠 쓴다
     # (앞 단계가 먼저 쓰고, 뒤 단계는 남은 예산만 쓴다):
-    #   1) 정기보고서 목록(최초 접수일)  2) 배당  3) 기업 연고표(L004, dart_profile.py) — 1)·2)가 끝나면 거의 전부
+    #   1) 정기보고서 목록(최초 접수일)  2) 배당  3) 기업 연고표(L004, dart_profile.py)
+    #   4) 사업보고서 '사업의 내용' 본문(L004, dart_business.py) — 앞 단계가 쓰고 남은 몫만
+    from .dart_business import collect_dart_business
     from .dart_profile import collect_dart_profile
 
     budget = [int(config().get("dividends", {}).get("dart_max_calls", 8000))]
     collect_dart_filings(budget)  # 회사당 1회, 약 3천 호출로 끝남
     collect_dart_dividend(budget)
     collect_dart_profile(budget)
+    collect_dart_business(budget)
