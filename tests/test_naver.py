@@ -232,3 +232,42 @@ def test_news_billing_stop_keeps_fetched(monkeypatch):
         naver.run_news()
     assert len(store.read(naver.NEWS_DS, "ALL")) == 1  # 멈추기 전에 받은 것은 저장
     assert store.get_state(naver.NEWS_DS, "ALL")["status"] == "error"
+
+
+# ── 수집 기록·빠진 날 ──
+def test_run_log_and_gaps(monkeypatch):
+    monkeypatch.setattr(naver, "keys", lambda: H)
+    t0 = pd.Timestamp("2026-11-18 17:18")
+    _mock(monkeypatch, _news_handler([_item(i, t0 - pd.Timedelta(minutes=i)) for i in range(50)]))
+    for day in ["2026-11-16", "2026-11-18"]:  # 11-17(화) 빠짐
+        _today(monkeypatch, day)
+        monkeypatch.setattr(naver, "datetime", _FixedDT(day))
+        naver.run_news()
+    r = naver.runs(naver.NEWS_DS)
+    assert r["kst_date"].tolist() == ["2026-11-16", "2026-11-18"] and r["status"].tolist() == ["ok", "ok"]
+    assert r["rows"].tolist() == [50, 0] and r["calls"].tolist() == [1, 1]
+    g = naver.gaps(naver.NEWS_DS, until="2026-11-18").set_index("date")
+    assert g.loc["2026-11-17", "problem"] == "missing" and g.loc["2026-11-16", "problem"] == ""
+    assert g.loc["2026-11-18", "problem"] == "empty"  # 성공했지만 새 기사 0건
+
+
+def test_run_log_records_error(monkeypatch):
+    monkeypatch.setattr(naver, "keys", lambda: H)
+    _today(monkeypatch, "2026-11-18")
+    monkeypatch.setattr(naver, "datetime", _FixedDT("2026-11-18"))
+    _mock(monkeypatch, lambda req: httpx.Response(401, json={"error": {"message": "Authentication Failed"}}))
+    with pytest.raises(naver.NaverStop):
+        naver.run_news()
+    r = naver.runs(naver.NEWS_DS)
+    assert r["status"].tolist() == ["error"] and "NaverStop" in r["error"].iloc[0]
+    assert naver.gaps(naver.NEWS_DS, until="2026-11-18")["problem"].tolist() == ["failed"]
+
+
+class _FixedDT:
+    """naver.datetime 대체: now()만 그날 09:00 KST로 고정."""
+
+    def __init__(self, day: str):
+        self._t = pd.Timestamp(f"{day} 09:00", tz="Asia/Seoul").tz_convert("UTC").to_pydatetime()
+
+    def now(self, tz=None):
+        return self._t

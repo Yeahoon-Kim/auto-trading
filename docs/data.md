@@ -170,6 +170,13 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   ```
 - **호출 한도** (`config/data.yaml`의 `naver`): 실제 HTTP 요청(재시도 포함)마다 `data/state.sqlite`의 `api_calls` 표에 KST 날짜별로 센다. 하루·월 한도에 닿으면 받은 데까지 저장하고 다음 실행에 이어받는다.
   공식 한도: 트렌드 월 5만 건, 뉴스 검색은 문서마다 하루 2.5만 / 월 77.5만(작은 쪽 기준), 키당 50회/초.
+- **수집 기록과 빠진 날 점검**: 실행마다 `data/state.sqlite`의 `naver_runs` 표에 1행을 남긴다 — `dataset`, `started_at`·`finished_at`(UTC), `kst_date`, `status`(ok = 끝까지 / limit = 한도에 닿아 일부만, 다음 실행에 이어받음 / error = 오류로 멈춤 / skip = 키 없음), `rows`(새로 저장한 행 수, 뉴스는 이미 있던 기사 제외), `calls`(그 실행의 호출 수), `error`.
+  ```powershell
+  uv run python -m autotrader.data.cli naver-gaps                         # 뉴스: 첫 수집일~오늘 중 문제 있는 날
+  uv run python -m autotrader.data.cli naver-gaps --dataset naver_trend --since 2026-11-18 --all
+  ```
+  `problem`: `missing`(그날 실행 기록 없음), `failed`(실행했지만 ok·limit 없음), `empty`(성공했지만 새 행 0 — 뉴스는 거래일이면 의심). `trading_day`는 krx_1d로 판단(주말 False, krx_1d가 아직 없는 날은 빈 값). 거래일(또는 아직 모르는 평일)에 문제가 있으면 종료 코드 1. 코드에서는 `naver.gaps()`, `naver.runs()`.
+  **앞으로 검증의 시작일** = `naver.runs("naver_news_live")`에서 status가 ok이고 rows > 0인 첫 `kst_date` 이후 첫 거래일. 그 뒤 `missing`·`failed`인 거래일은 그날 장중 기사가 비어 있을 수 있다(질의당 최신 1,100건까지는 다음 실행이 메우므로 `누락 가능` 로그가 없으면 대개 채워진다).
 - **과금 멈춤**: NAVER API HUB는 "한시적 무료, 유료 전환 시 사전 공지"다. 401·402·403, 본문에 유료·과금·결제 등의 말이 있는 오류, 429 반복이면 `NaverStop`으로 즉시 멈추고 상태에 오류를 남기며 텔레그램(`logs/alerts.log`)으로 알린다. 이때는 개발·점검 HQ가 사용자에게 보고한다 (비용은 사용자 승인).
 
 ### 검색어 트렌드 시점 규칙 (lab이 지킬 것)

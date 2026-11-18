@@ -331,7 +331,20 @@ def _mark_queries(df: pd.DataFrame) -> None:
             con.execute("INSERT OR REPLACE INTO naver_news_query VALUES (?,?,?)", (q, last.isoformat(), now))
 
 
+def _new_rows(df: pd.DataFrame) -> int:
+    """이미 저장된 (link, query)를 뺀 새 행 수 (수집 기록의 '받은 건수')."""
+    folder = store.DATA_DIR / NEWS_DS / SYMBOL
+    old = set()
+    for y in df["ts"].dt.strftime("%Y").unique():
+        f = folder / f"{y}.parquet"
+        if f.exists():
+            o = pd.read_parquet(f, columns=["link", "query"])
+            old |= set(zip(o["link"], o["query"], strict=True))
+    return sum((k, q) not in old for k, q in zip(df["link"], df["query"], strict=True))
+
+
 def collect_news(headers: dict) -> int:
+    """새로 저장한 행 수를 돌려준다."""
     c = config()["naver"]["news"]
     qs = [(q, "theme", "") for q in c.get("theme_queries") or []]
     sq = surge_queries(float(c.get("surge_pct", 15)), int(c.get("max_stock_queries", 60)))
@@ -347,25 +360,87 @@ def collect_news(headers: dict) -> int:
         logger.info(f"{e} → 다음 실행에 이어받기")
     finally:
         if buf:
-            df = pd.concat(buf, ignore_index=True)
-            n = store.write(NEWS_DS, SYMBOL, df, key=["link", "query"])
+            df = pd.concat(buf, ignore_index=True).drop_duplicates(["link", "query"])
+            n = _new_rows(df)
+            store.write(NEWS_DS, SYMBOL, df, key=["link", "query"])
             _mark_queries(df)
     d, m = calls("news")
-    logger.info(f"{NEWS_DS}: {len(qs)}개 질의, {n:,}행 저장(중복 포함 전), 호출 오늘 {d:,} / 이번 달 {m:,}")
+    logger.info(f"{NEWS_DS}: {len(qs)}개 질의, 새 기사 {n:,}행, 호출 오늘 {d:,} / 이번 달 {m:,}")
     return n
 
 
+# ── 수집 기록 (state.sqlite의 naver_runs 표) — 빠진 날을 나중에 찾기 위해 실행마다 1행 ──
+API_OF = {TREND_DS: "trend", NEWS_DS: "news"}
+
+
+def _record(ds: str, started: datetime, status: str, rows: int, calls_before: int, error: str = "") -> None:
+    fin = datetime.now(UTC)
+    with _ledger() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS naver_runs (dataset TEXT, started_at TEXT, finished_at TEXT,"
+                    " kst_date TEXT, status TEXT, rows INTEGER, calls INTEGER, error TEXT)")
+        con.execute("INSERT INTO naver_runs VALUES (?,?,?,?,?,?,?,?)", (
+            ds, started.isoformat(timespec="seconds"), fin.isoformat(timespec="seconds"),
+            f"{pd.Timestamp(started).tz_convert(KST):%Y-%m-%d}", status, int(rows),
+            calls(API_OF[ds])[0] - calls_before if status != "skip" else 0, error[:500]))
+
+
+def runs(ds: str | None = None) -> pd.DataFrame:
+    """수집 기록. 열: dataset, started_at·finished_at(UTC), kst_date, status(ok·limit·error·skip), rows, calls, error.
+    status: ok = 끝까지 받음, limit = 호출 한도에 닿아 일부만(다음 실행에 이어받음), error = 오류로 멈춤, skip = 키 없음."""
+    with _ledger() as con:
+        con.execute("CREATE TABLE IF NOT EXISTS naver_runs (dataset TEXT, started_at TEXT, finished_at TEXT,"
+                    " kst_date TEXT, status TEXT, rows INTEGER, calls INTEGER, error TEXT)")
+        df = pd.read_sql("SELECT * FROM naver_runs" + (" WHERE dataset=?" if ds else "") + " ORDER BY started_at",
+                         con, params=(ds,) if ds else None)
+    return df
+
+
+def gaps(ds: str = NEWS_DS, since: str | None = None, until: str | None = None) -> pd.DataFrame:
+    """since~until(KST 날짜, 기본: 첫 수집일~오늘) 하루씩 수집 상태. 열: date, weekday, trading_day, runs, ok_runs,
+    rows, problem. problem: 'missing'(실행 기록 없음), 'failed'(실행은 했으나 ok·limit 없음), 'empty'(성공했지만 0행 —
+    뉴스는 거래일이면 의심), ''(정상). trading_day는 krx_1d에 그날 행이 있으면 True, 주말 False, 그 밖은 None(아직 모름)."""
+    r = runs(ds)
+    if since is None:
+        if r.empty:
+            return pd.DataFrame(columns=["date", "weekday", "trading_day", "runs", "ok_runs", "rows", "problem"])
+        since = r["kst_date"].min()
+    days = pd.date_range(since, until or f"{_kst_today():%Y-%m-%d}")
+    krx = set()
+    for f in sorted((store.DATA_DIR / "krx_1d" / SYMBOL).glob("*.parquet"))[-2:]:
+        krx |= {f"{t:%Y-%m-%d}" for t in pd.read_parquet(f, columns=["ts"])["ts"].dt.tz_convert(KST).unique()}
+    last_krx = max(krx) if krx else ""
+    out = []
+    for d in days:
+        k = f"{d:%Y-%m-%d}"
+        g = r[r["kst_date"] == k]
+        ok = g[g["status"].isin(["ok", "limit"])]
+        td = False if d.weekday() >= 5 else (k in krx if k <= last_krx else None)
+        problem = "missing" if g.empty else "failed" if ok.empty else "empty" if ok["rows"].sum() == 0 else ""
+        out.append((k, d.day_name()[:3], td, len(g), len(ok), int(ok["rows"].sum()), problem))
+    return pd.DataFrame(out, columns=["date", "weekday", "trading_day", "runs", "ok_runs", "rows", "problem"])
+
+
 def _run(ds: str, fn) -> None:
+    started = datetime.now(UTC)
     headers = keys()
     if headers is None:
         logger.info(f"{ds}: NAVER_CLIENT_ID/NAVER_CLIENT_SECRET 없음 → 건너뜀")
+        _record(ds, started, "skip", 0, 0, "키 없음")
         return
+    api = API_OF[ds]
+    before = calls(api)[0]
     try:
-        fn(headers)
-    except NaverStop as e:
-        store.set_state(ds, SYMBOL, status="error", error=str(e)[:500])
-        logger.error(f"{ds} 중단 (과금·인증·한도 의심, HQ 보고 필요): {e}")
+        n = fn(headers)
+    except Exception as e:
+        _record(ds, started, "error", 0, before, f"{type(e).__name__}: {e}")
+        if isinstance(e, NaverStop):
+            store.set_state(ds, SYMBOL, status="error", error=str(e)[:500])
+            logger.error(f"{ds} 중단 (과금·인증·한도 의심, HQ 보고 필요): {e}")
         raise  # cli가 텔레그램으로 알린다
+    c = config()["naver"][api]
+    d, m = calls(api)
+    hit = d >= c["max_calls_per_day"] or m >= c["max_calls_per_month"]
+    _record(ds, started, "limit" if hit else "ok", n, before)
 
 
 def run_trend(symbols: list[str] | None = None) -> None:
