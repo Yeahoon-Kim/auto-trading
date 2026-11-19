@@ -87,7 +87,7 @@ naver:                         # `collect naver-trend`, `collect naver-news` (co
     max_calls_per_day: 3000
     max_calls_per_month: 60000
     theme_queries: [관련주, 테마주, 특징주, 수혜주, 상한가]
-    theme_max_pages: 11        # 질의당 최신 1,100건까지 (API 상한: start ≤ 1000, display 100)
+    theme_max_pages: 11        # 질의당 최신 1,099건까지 (API 상한: start ≤ 1000, display ≤ 100 → 마지막 쪽 start=1000)
     surge_pct: 15              # krx_1d 최근 거래일 상승률 이 % 이상 종목명도 질의 (상한가 30% 포함)
     max_stock_queries: 60      # 급등 종목 질의 상한 (상승률 큰 순)
     stock_max_pages: 2

@@ -22,6 +22,8 @@ import duckdb
 import pandas as pd
 from dotenv import load_dotenv
 
+from .redact import redact
+
 load_dotenv()
 
 ROOT = Path(__file__).resolve().parents[3]  # 코드·설정(config/) 기준. 데이터 위치와는 별개.
@@ -149,7 +151,7 @@ def set_state(dataset: str, symbol: str, first_ts=None, last_ts=None, backfill_d
                 dataset, symbol,
                 cur["first_ts"].isoformat() if cur["first_ts"] is not None else None,
                 cur["last_ts"].isoformat() if cur["last_ts"] is not None else None,
-                int(cur["backfill_done"]), status, error,
+                int(cur["backfill_done"]), status, redact(error) if error is not None else None,
                 datetime.now(UTC).isoformat(timespec="seconds"),
             ),
         )

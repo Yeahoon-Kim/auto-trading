@@ -27,7 +27,13 @@
   collected_at(UTC). 키 = (link, query). 본문은 받지 않는다. 저작권 대상이라 data/ 밖(git·외부)에 올리지 않는다.
   - 질의: naver.news.theme_queries + 최근 거래일 krx_1d에서 naver.news.surge_pct 이상 오른 종목명(상한가 포함).
   - 최신순(sort=date)으로 100건씩 넘기다가, 그 질의에서 지난번에 받은 가장 늦은 기사 시각보다 오래된 기사가 나오면 멈춘다.
-    API는 질의당 최신 1,100건까지만 주므로 그 안에서 못 따라잡으면 로그에 '누락 가능'을 남긴다.
+    API HUB 문서(api.ncloud-docs.com/docs/naver-api-hub-search-news): start 1~1000, display 1~100 → 범위를 넘으면
+    400 SE03/SE02. 그래서 쪽 시작 위치는 1, 101, …, 901, 1000 (마지막 쪽은 1,000번째부터, 1건 겹침) — 질의당
+    최신 1,099건까지. 그 안에서 못 따라잡으면 로그에 '누락 가능'을 남긴다.
+    (2026-11-19 첫 실행은 11번째 쪽을 start=1001로 불러 400으로 전체가 죽었다.)
+  - 한 질의가 실패해도(400 등) 그 질의만 건너뛰고 다음 질의로 간다. 실패한 질의는 받은 쪽까지 저장하되 '마지막 기사
+    시각'을 올리지 않아 다음 실행이 처음부터 다시 받는다. 실행 기록 status는 'partial'. 과금·인증(NaverStop)과
+    호출 한도(DailyLimit)는 질의가 아니라 실행 전체를 멈춘다. 질의가 모두 실패하면 오류로 멈춘다(알림).
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ import pandas as pd
 from dotenv import dotenv_values
 
 from .. import store
+from ..redact import redact
 from .common import RateLimiter, config, logger
 
 KST = "Asia/Seoul"
@@ -264,9 +271,23 @@ def _clean(s: str) -> str:
     return html.unescape(_TAG.sub("", s or "")).strip()
 
 
+NEWS_PAGE, NEWS_MAX_START = 100, 1000  # API HUB 문서: display 1~100, start 1~1000
+
+
+def page_starts(max_pages: int) -> list[int]:
+    """쪽 시작 위치. 1, 101, …을 start 상한(1000)에서 자르고, 상한에 닿은 쪽 다음은 없다."""
+    out: list[int] = []
+    for p in range(max_pages):
+        s = min(1 + NEWS_PAGE * p, NEWS_MAX_START)
+        if out and s <= out[-1]:
+            break
+        out.append(s)
+    return out
+
+
 def _news_page(query: str, start: int, headers: dict) -> tuple[pd.DataFrame, int]:
     j = _request("news", "GET", NEWS_URL, headers,
-                 params={"query": query, "display": 100, "start": start, "sort": "date"})
+                 params={"query": query, "display": NEWS_PAGE, "start": start, "sort": "date"})
     items = j.get("items") or []
     if not items:
         return pd.DataFrame(), 0
@@ -297,28 +318,37 @@ def surge_queries(pct: float, max_n: int) -> pd.DataFrame:
     return pd.DataFrame({"query": hit["name"].astype(str).str.strip(), "symbol": hit.index.astype(str)})
 
 
-def _news_query(query: str, kind: str, symbol: str, max_pages: int, headers: dict) -> pd.DataFrame:
+def _news_query(query: str, kind: str, symbol: str, max_pages: int, headers: dict) -> tuple[pd.DataFrame, str]:
+    """(받은 기사, 오류). 오류가 나면 그때까지 받은 쪽과 오류 문구를 돌려준다 (NaverStop·DailyLimit은 그대로 올린다)."""
     with _ledger() as con:
         row = con.execute("SELECT last_pub FROM naver_news_query WHERE query=?", (query,)).fetchone()
     last = pd.Timestamp(row[0]) if row and row[0] else None
-    parts, caught_up = [], last is None
-    for p in range(max_pages):
-        df, cnt = _news_page(query, 1 + 100 * p, headers)
+    parts, caught_up, err, starts = [], last is None, "", page_starts(max_pages)
+    for start in starts:
+        try:
+            df, cnt = _news_page(query, start, headers)
+        except (NaverStop, DailyLimit):
+            raise
+        except Exception as e:  # noqa: BLE001 — 400(요청 형식)·재시도 소진 등 → 이 질의만 건너뛴다
+            err = f"{type(e).__name__}: {e}"
+            logger.error(f"{NEWS_DS} '{query}' start={start} 실패 → 이 질의 건너뜀 (다음 실행에 처음부터): {err}")
+            break
         if not df.empty:
             parts.append(df)
-        if cnt < 100:
+        if cnt < NEWS_PAGE:
             caught_up = True
             break
         if last is not None and df["ts"].min() < last:
             caught_up = True
             break
+    if not caught_up and not err:
+        logger.warning(f"{NEWS_DS} '{query}': 최신 {starts[-1] + NEWS_PAGE - 1:,}건 안에서 지난 수집({last})까지 못 감"
+                       " → 누락 가능")
     if not parts:
-        return pd.DataFrame()
+        return pd.DataFrame(), err
     out = pd.concat(parts, ignore_index=True)
-    if not caught_up:
-        logger.warning(f"{NEWS_DS} '{query}': {max_pages * 100}건 안에서 지난 수집({last})까지 못 감 → 누락 가능")
     return out.assign(query=query, query_kind=kind, symbol=symbol,
-                      collected_at=pd.Timestamp.now(tz="UTC").floor("s"))
+                      collected_at=pd.Timestamp.now(tz="UTC").floor("s")), err
 
 
 def _mark_queries(df: pd.DataFrame) -> None:
@@ -343,17 +373,19 @@ def _new_rows(df: pd.DataFrame) -> int:
     return sum((k, q) not in old for k, q in zip(df["link"], df["query"], strict=True))
 
 
-def collect_news(headers: dict) -> int:
-    """새로 저장한 행 수를 돌려준다."""
+def collect_news(headers: dict) -> tuple[int, list[str]]:
+    """(새로 저장한 행 수, 실패한 질의의 오류 목록 '질의: 오류'). 질의가 모두 실패하면 RuntimeError."""
     c = config()["naver"]["news"]
     qs = [(q, "theme", "") for q in c.get("theme_queries") or []]
     sq = surge_queries(float(c.get("surge_pct", 15)), int(c.get("max_stock_queries", 60)))
     qs += [(q, "stock", s) for q, s in zip(sq["query"], sq["symbol"], strict=True)]
-    buf, n = [], 0
+    buf, n, failed = [], 0, {}
     try:
         for q, kind, sym in qs:
             pages = int(c.get("theme_max_pages", 11) if kind == "theme" else c.get("stock_max_pages", 2))
-            df = _news_query(q, kind, sym, pages, headers)
+            df, err = _news_query(q, kind, sym, pages, headers)
+            if err:
+                failed[q] = err
             if not df.empty:
                 buf.append(df)
     except DailyLimit as e:
@@ -363,10 +395,13 @@ def collect_news(headers: dict) -> int:
             df = pd.concat(buf, ignore_index=True).drop_duplicates(["link", "query"])
             n = _new_rows(df)
             store.write(NEWS_DS, SYMBOL, df, key=["link", "query"])
-            _mark_queries(df)
+            _mark_queries(df[~df["query"].isin(failed)])  # 실패한 질의는 다음 실행이 처음부터
     d, m = calls("news")
-    logger.info(f"{NEWS_DS}: {len(qs)}개 질의, 새 기사 {n:,}행, 호출 오늘 {d:,} / 이번 달 {m:,}")
-    return n
+    logger.info(f"{NEWS_DS}: {len(qs)}개 질의 (실패 {len(failed)}), 새 기사 {n:,}행, 호출 오늘 {d:,} / 이번 달 {m:,}")
+    errs = [f"{q}: {e}" for q, e in failed.items()]
+    if qs and len(failed) == len(qs):
+        raise RuntimeError(f"{NEWS_DS} 질의 {len(qs)}개 모두 실패 — " + " | ".join(errs)[:400])
+    return n, errs
 
 
 # ── 수집 기록 (state.sqlite의 naver_runs 표) — 빠진 날을 나중에 찾기 위해 실행마다 1행 ──
@@ -381,12 +416,13 @@ def _record(ds: str, started: datetime, status: str, rows: int, calls_before: in
         con.execute("INSERT INTO naver_runs VALUES (?,?,?,?,?,?,?,?)", (
             ds, started.isoformat(timespec="seconds"), fin.isoformat(timespec="seconds"),
             f"{pd.Timestamp(started).tz_convert(KST):%Y-%m-%d}", status, int(rows),
-            calls(API_OF[ds])[0] - calls_before if status != "skip" else 0, error[:500]))
+            calls(API_OF[ds])[0] - calls_before if status != "skip" else 0, redact(error)[:500]))
 
 
 def runs(ds: str | None = None) -> pd.DataFrame:
-    """수집 기록. 열: dataset, started_at·finished_at(UTC), kst_date, status(ok·limit·error·skip), rows, calls, error.
-    status: ok = 끝까지 받음, limit = 호출 한도에 닿아 일부만(다음 실행에 이어받음), error = 오류로 멈춤, skip = 키 없음."""
+    """수집 기록. 열: dataset, started_at·finished_at(UTC), kst_date, status(ok·limit·partial·error·skip), rows, calls,
+    error. status: ok = 끝까지 받음, limit = 호출 한도에 닿아 일부만(다음 실행에 이어받음), partial = 일부 질의가
+    실패(error에 '질의: 오류', 실패 질의는 다음 실행이 처음부터), error = 오류로 멈춤, skip = 키 없음."""
     with _ledger() as con:
         con.execute("CREATE TABLE IF NOT EXISTS naver_runs (dataset TEXT, started_at TEXT, finished_at TEXT,"
                     " kst_date TEXT, status TEXT, rows INTEGER, calls INTEGER, error TEXT)")
@@ -397,8 +433,10 @@ def runs(ds: str | None = None) -> pd.DataFrame:
 
 def gaps(ds: str = NEWS_DS, since: str | None = None, until: str | None = None) -> pd.DataFrame:
     """since~until(KST 날짜, 기본: 첫 수집일~오늘) 하루씩 수집 상태. 열: date, weekday, trading_day, runs, ok_runs,
-    rows, problem. problem: 'missing'(실행 기록 없음), 'failed'(실행은 했으나 ok·limit 없음), 'empty'(성공했지만 0행 —
-    뉴스는 거래일이면 의심), ''(정상). trading_day는 krx_1d에 그날 행이 있으면 True, 주말 False, 그 밖은 None(아직 모름)."""
+    rows, problem. problem: 'missing'(실행 기록 없음), 'failed'(실행은 했으나 ok·limit·partial 없음), 'partial'(일부
+    질의만 성공한 실행뿐 — ok·limit 실행이 없음), 'empty'(성공했지만 0행 — 뉴스는 거래일이면 의심), ''(정상).
+    ok_runs는 ok·limit 실행 수, rows는 ok·limit·partial 실행의 새 행 합.
+    trading_day는 krx_1d에 그날 행이 있으면 True, 주말 False, 그 밖은 None(아직 모름)."""
     r = runs(ds)
     if since is None:
         if r.empty:
@@ -414,9 +452,12 @@ def gaps(ds: str = NEWS_DS, since: str | None = None, until: str | None = None) 
         k = f"{d:%Y-%m-%d}"
         g = r[r["kst_date"] == k]
         ok = g[g["status"].isin(["ok", "limit"])]
+        part = g[g["status"] == "partial"]
+        got = int(ok["rows"].sum() + part["rows"].sum())
         td = False if d.weekday() >= 5 else (k in krx if k <= last_krx else None)
-        problem = "missing" if g.empty else "failed" if ok.empty else "empty" if ok["rows"].sum() == 0 else ""
-        out.append((k, d.day_name()[:3], td, len(g), len(ok), int(ok["rows"].sum()), problem))
+        problem = ("missing" if g.empty else "failed" if ok.empty and part.empty else "partial" if ok.empty
+                   else "empty" if got == 0 else "")
+        out.append((k, d.day_name()[:3], td, len(g), len(ok), got, problem))
     return pd.DataFrame(out, columns=["date", "weekday", "trading_day", "runs", "ok_runs", "rows", "problem"])
 
 
@@ -430,7 +471,7 @@ def _run(ds: str, fn) -> None:
     api = API_OF[ds]
     before = calls(api)[0]
     try:
-        n = fn(headers)
+        res = fn(headers)  # 트렌드: 행 수, 뉴스: (행 수, 실패한 질의 오류 목록)
     except Exception as e:
         _record(ds, started, "error", 0, before, f"{type(e).__name__}: {e}")
         if isinstance(e, NaverStop):
@@ -440,7 +481,10 @@ def _run(ds: str, fn) -> None:
     c = config()["naver"][api]
     d, m = calls(api)
     hit = d >= c["max_calls_per_day"] or m >= c["max_calls_per_month"]
-    _record(ds, started, "limit" if hit else "ok", n, before)
+    n, failed = res if isinstance(res, tuple) else (res, [])
+    if failed:
+        logger.error(f"{ds}: 질의 {len(failed)}개 실패 (나머지는 저장) — 수집 기록 status=partial")
+    _record(ds, started, "partial" if failed else "limit" if hit else "ok", n, before, " | ".join(failed))
 
 
 def run_trend(symbols: list[str] | None = None) -> None:

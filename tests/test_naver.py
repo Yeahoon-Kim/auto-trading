@@ -167,8 +167,13 @@ def _item(i: int, minute: pd.Timestamp) -> dict:
 
 def _news_handler(articles: list[dict]):
     def h(req):
-        start = int(req.url.params["start"])
+        start, display = int(req.url.params["start"]), int(req.url.params["display"])
         assert req.url.params["sort"] == "date"
+        if not 1 <= start <= 1000:  # API HUB 문서와 2026-11-19 실제 응답
+            return httpx.Response(400, json={"errorMessage": "Invalid start value (부적절한 start 값입니다.)",
+                                             "errorCode": "SE03"})
+        if not 1 <= display <= 100:
+            return httpx.Response(400, json={"errorMessage": "Invalid display value", "errorCode": "SE02"})
         page = articles[start - 1:start - 1 + 100]
         return httpx.Response(200, json={"lastBuildDate": "x", "total": len(articles), "start": start,
                                          "display": len(page), "items": page})
@@ -194,6 +199,65 @@ def test_news_paging_dedup_and_resume(monkeypatch):
     assert len(log2) == 2
     df = store.read(naver.NEWS_DS, "ALL")
     assert len(df) == 370 and df["link"].is_unique
+
+
+def test_page_starts_respect_api_cap():
+    assert naver.page_starts(3) == [1, 101, 201]
+    assert naver.page_starts(11) == [1, 101, 201, 301, 401, 501, 601, 701, 801, 901, 1000]
+    assert naver.page_starts(20) == naver.page_starts(11)  # 상한에 닿으면 더 넘기지 않는다
+    assert max(naver.page_starts(50)) <= 1000
+
+
+def test_news_deep_paging_stays_within_start_cap(monkeypatch):
+    """2026-11-19: 11쪽째 start=1001 → 400 SE03으로 전체 실행이 죽었다. 이제 1,099건까지 받고 400 없이 끝난다."""
+    cfg = {"naver": {**CFG["naver"], "news": {**CFG["naver"]["news"], "theme_max_pages": 11}}}
+    monkeypatch.setattr(naver, "config", lambda: cfg)
+    t0 = pd.Timestamp("2026-11-18 17:18")
+    arts = [_item(i, t0 - pd.Timedelta(minutes=i)) for i in range(1500)]
+    log = _mock(monkeypatch, _news_handler(arts))
+    n, failed = naver.collect_news(H)
+    assert failed == [] and [int(r.url.params["start"]) for r in log][-2:] == [901, 1000]
+    assert n == 1099 and len(store.read(naver.NEWS_DS, "ALL")) == 1099
+
+
+def test_news_one_query_failure_does_not_kill_run(monkeypatch):
+    """한 질의가 400이면 그 질의만 건너뛰고, 실행 기록은 partial, 실패 질의는 다음 실행이 처음부터 다시."""
+    cfg = {"naver": {**CFG["naver"], "news": {**CFG["naver"]["news"], "theme_queries": ["나쁨", "좋음"]}}}
+    monkeypatch.setattr(naver, "config", lambda: cfg)
+    monkeypatch.setattr(naver, "keys", lambda: H)
+    _today(monkeypatch, "2026-11-18")
+    monkeypatch.setattr(naver, "datetime", _FixedDT("2026-11-18"))
+    t0 = pd.Timestamp("2026-11-18 17:18")
+    good = _news_handler([_item(i, t0 - pd.Timedelta(minutes=i)) for i in range(150)])
+
+    def h(req):
+        if req.url.params["query"] == "나쁨" and req.url.params["start"] != "1":  # 2쪽째에서 400
+            return httpx.Response(400, json={"errorMessage": "Invalid start value", "errorCode": "SE03"})
+        return good(req)
+    log = _mock(monkeypatch, h)
+    naver.run_news()  # 예외 없이 끝난다
+    df = store.read(naver.NEWS_DS, "ALL")
+    assert set(df["query"]) == {"나쁨", "좋음"}  # 실패 질의도 받은 쪽(100건)은 저장
+    assert (df["query"] == "나쁨").sum() == 100 and (df["query"] == "좋음").sum() == 150
+    r = naver.runs(naver.NEWS_DS)
+    assert r["status"].tolist() == ["partial"] and r["rows"].tolist() == [250] and r["calls"].tolist() == [len(log)]
+    assert "나쁨" in r["error"].iloc[0] and "SE03" in r["error"].iloc[0]
+    g = naver.gaps(naver.NEWS_DS, until="2026-11-18")
+    assert g["problem"].tolist() == ["partial"] and g["rows"].tolist() == [250]
+    with naver._ledger() as con:
+        marked = {q for (q,) in con.execute("SELECT query FROM naver_news_query")}
+    assert marked == {"좋음"}  # 실패 질의는 마지막 기사 시각을 올리지 않는다
+
+
+def test_news_all_queries_fail_is_error(monkeypatch):
+    monkeypatch.setattr(naver, "keys", lambda: H)
+    _today(monkeypatch, "2026-11-18")
+    monkeypatch.setattr(naver, "datetime", _FixedDT("2026-11-18"))
+    _mock(monkeypatch, lambda req: httpx.Response(400, json={"errorCode": "SE01"}))
+    with pytest.raises(RuntimeError, match="모두 실패"):
+        naver.run_news()
+    assert naver.runs(naver.NEWS_DS)["status"].tolist() == ["error"]
+    assert naver.gaps(naver.NEWS_DS, until="2026-11-18")["problem"].tolist() == ["failed"]
 
 
 def test_news_surge_queries(monkeypatch):

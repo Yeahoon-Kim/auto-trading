@@ -94,8 +94,10 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 - **KR 종목코드 재사용**: 상장폐지 종목의 코드를 다른 회사가 다시 쓰는 경우가 드물게 있다.
 - **거시 지표 시점**: `macro_1d`·`fred`·`regime_1d`의 날짜는 관측일이다. 실제로 알 수 있는 건 다음 날이므로 전략에서는 `shift(1)` 해서 쓴다.
 - **FRED 신용 스프레드**(ICE BofA)는 라이선스 문제로 최근 3년만 제공된다. 그 이전 구간의 국면 지표에서는 이 신호가 빠진다: `regime_1d`는 이 신호를 '없음(0)'으로 세지 않고 `risk_off_available`에서 뺀다(2023-11 이전 최대 3개). 셀 수 있는 신호가 하나도 없는 날은 `risk_off_signals`·`risk_regime`이 비어 있다. 국면 기준(켜진 신호 3개 이상 위험회피, 1개 이상 중립)은 개수 그대로라, 신호가 적게 셀 수 있는 구간은 위험회피가 덜 나온다 — 구간 간 비교 시 `risk_off_available`로 나눠 보거나 같은 신호만 골라 쓴다.
+- **로그의 키 가리기** (2026-11-19부터): 수집 로그(`logs/collect_*.log`, stderr → `.err`), 잡히지 않은 예외의 트레이스백, `state.sqlite`의 오류 문구, 텔레그램 알림은 `autotrader.data.redact.redact()`를 거친다 — URL 쿼리의 키 성격 이름(`crtfc_key`·`serviceKey`·`api_key`·`apikey`·`key`·`token`·`appkey`·`appsecret` 등) 값, ECOS 경로의 키, 이름에 KEY·SECRET·TOKEN·PASSWORD·ACCOUNT_NO·CLIENT_ID가 든 환경변수 값을 `***`로 바꾼다. 새 수집기도 로그는 `common.logger`, HTTP는 `get_json`을 쓰면 자동으로 가려진다.
 - **공시 시점**: DART는 접수일만 있으므로 일봉 전략에서는 다음 날부터 알 수 있는 정보로 쓴다.
 - **KR 재무는 `dart_fin`을 쓴다** (legacy는 2026-08 1회 가져오기라 갱신되지 않는다).
+  - 수집: 100개사씩 묶어 묻는다. 2026-11-19부터 DART가 일부 묶음에 302 → `error1.html`을 준다 (같은 100개사도 순서만 바꾸면 200, 99개·50개는 200, 같은 묶음은 연도·보고서가 달라도 302 → 한도·정책이 아니라 요청 문자열을 거르는 것으로 보임). 302가 오면 묶음을 반으로 나눠 다시 묻고, 1개사 요청도 302면 DART 점검·차단으로 보고 그 실행을 멈춘다. 리다이렉트는 재시도하지 않는다(`common.Redirected`).
   - 시점: `filed` 다음 날부터 알 수 있는 정보로 쓴다. 기존의 +45일 규칙은 실제 접수보다 이를 수 있다. 예: 삼성전자 2025 반기는 추정 8/12, 실제 접수 8/14.
   - 4분기: 국내에는 4분기 보고서가 없다. 4분기는 `FY − Q3의 _cum`으로 계산하고, 알 수 있는 시점은 사업보고서 접수일이다. 4분기 잠정실적은 공시 목록의 "영업(잠정)실적"이 더 빠르다.
   - 정정: DART는 최신(정정) 값을 준다. 정정된 보고서는 `filed`가 정정일이라 시점은 보수적이다. 다만 정정 전 원래 값은 남지 않는다.
@@ -197,13 +199,13 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   ```
 - **호출 한도** (`config/data.yaml`의 `naver`): 실제 HTTP 요청(재시도 포함)마다 `data/state.sqlite`의 `api_calls` 표에 KST 날짜별로 센다. 하루·월 한도에 닿으면 받은 데까지 저장하고 다음 실행에 이어받는다.
   공식 한도: 트렌드 월 5만 건, 뉴스 검색은 문서마다 하루 2.5만 / 월 77.5만(작은 쪽 기준), 키당 50회/초.
-- **수집 기록과 빠진 날 점검**: 실행마다 `data/state.sqlite`의 `naver_runs` 표에 1행을 남긴다 — `dataset`, `started_at`·`finished_at`(UTC), `kst_date`, `status`(ok = 끝까지 / limit = 한도에 닿아 일부만, 다음 실행에 이어받음 / error = 오류로 멈춤 / skip = 키 없음), `rows`(새로 저장한 행 수, 뉴스는 이미 있던 기사 제외), `calls`(그 실행의 호출 수), `error`.
+- **수집 기록과 빠진 날 점검**: 실행마다 `data/state.sqlite`의 `naver_runs` 표에 1행을 남긴다 — `dataset`, `started_at`·`finished_at`(UTC), `kst_date`, `status`(ok = 끝까지 / limit = 한도에 닿아 일부만, 다음 실행에 이어받음 / partial = 일부 질의가 실패, `error`에 '질의: 오류' / error = 오류로 멈춤 / skip = 키 없음), `rows`(새로 저장한 행 수, 뉴스는 이미 있던 기사 제외), `calls`(그 실행의 호출 수), `error`.
   ```powershell
   uv run python -m autotrader.data.cli naver-gaps                         # 뉴스: 첫 수집일~오늘 중 문제 있는 날
   uv run python -m autotrader.data.cli naver-gaps --dataset naver_trend --since 2026-11-18 --all
   ```
-  `problem`: `missing`(그날 실행 기록 없음), `failed`(실행했지만 ok·limit 없음), `empty`(성공했지만 새 행 0 — 뉴스는 거래일이면 의심). `trading_day`는 krx_1d로 판단(주말 False, krx_1d가 아직 없는 날은 빈 값). 거래일(또는 아직 모르는 평일)에 문제가 있으면 종료 코드 1. 코드에서는 `naver.gaps()`, `naver.runs()`.
-  **앞으로 검증의 시작일** = `naver.runs("naver_news_live")`에서 status가 ok이고 rows > 0인 첫 `kst_date` 이후 첫 거래일. 그 뒤 `missing`·`failed`인 거래일은 그날 장중 기사가 비어 있을 수 있다(질의당 최신 1,100건까지는 다음 실행이 메우므로 `누락 가능` 로그가 없으면 대개 채워진다).
+  `problem`: `missing`(그날 실행 기록 없음), `failed`(실행했지만 ok·limit·partial 없음), `partial`(일부 질의만 성공한 실행뿐), `empty`(성공했지만 새 행 0 — 뉴스는 거래일이면 의심). `trading_day`는 krx_1d로 판단(주말 False, krx_1d가 아직 없는 날은 빈 값). 거래일(또는 아직 모르는 평일)에 문제가 있으면 종료 코드 1. 코드에서는 `naver.gaps()`, `naver.runs()`.
+  **앞으로 검증의 시작일** = `naver.runs("naver_news_live")`에서 status가 ok이고 rows > 0인 첫 `kst_date` 이후 첫 거래일. 2026-11-18·19 정기 실행은 아래 start 상한 문제로 모두 error였다(2026-11-19 수정). 그 뒤 `missing`·`failed`·`partial`인 거래일은 그날 장중 기사가 비어 있을 수 있다(질의당 최신 1,099건까지는 다음 실행이 메우므로 `누락 가능` 로그가 없으면 대개 채워진다).
 - **과금 멈춤**: NAVER API HUB는 "한시적 무료, 유료 전환 시 사전 공지"다. 401·402·403, 본문에 유료·과금·결제 등의 말이 있는 오류, 429 반복이면 `NaverStop`으로 즉시 멈추고 상태에 오류를 남기며 텔레그램(`logs/alerts.log`)으로 알린다. 이때는 개발·점검 HQ가 사용자에게 보고한다 (비용은 사용자 승인).
 
 ### 검색어 트렌드 시점 규칙 (lab이 지킬 것)
@@ -217,7 +219,8 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 
 ### 뉴스 앞으로 수집 규칙
 - 질의: `naver.news.theme_queries`(관련주·테마주·특징주·수혜주·상한가) + `krx_1d` **최근 거래일**에 15% 이상 오른 종목명(상승률 큰 순 60개). `krx_1d`는 KRX가 다음 영업일에 공개하므로 17:00 실행 때 급등 종목은 **전 거래일** 것이다 (그날 종목은 theme 질의의 `상한가`·`특징주` 기사로 잡힌다).
-- 최신순으로 100건씩 넘기다 지난번 마지막 기사 시각보다 오래된 기사가 나오면 멈춘다. API는 질의당 최신 1,100건까지만 주므로 그 안에서 못 따라잡으면 로그에 `누락 가능`이 남는다 (샘플: `특징주` 9시간에 100건, `테마주` 1주에 100건 → 하루 2회면 충분).
+- 최신순으로 100건씩 넘기다 지난번 마지막 기사 시각보다 오래된 기사가 나오면 멈춘다. API HUB 문서(`api.ncloud-docs.com/docs/naver-api-hub-search-news`)의 범위는 **start 1~1000, display 1~100** (넘으면 400 `SE03`·`SE02`)이라 쪽 시작 위치는 1, 101, …, 901, **1000**(1건 겹침) → 질의당 최신 1,099건까지. 그 안에서 못 따라잡으면 로그에 `누락 가능`이 남는다 (샘플: `특징주` 9시간에 100건, `테마주` 1주에 100건 → 하루 2회면 충분).
+  2026-11-19 첫 정기 실행은 11쪽째를 start=1001로 불러 400으로 실행 전체가 죽었다 → 상한을 지키게 고치고, 한 질의가 실패해도(400 등) 그 질의만 건너뛰게 했다. 실패한 질의는 받은 쪽까지 저장하되 마지막 기사 시각을 올리지 않아 다음 실행이 처음부터 다시 받고, 실행 기록은 `partial`. 질의가 모두 실패하면 error로 멈추고 알린다. 과금·인증(`NaverStop`)·호출 한도는 질의가 아니라 실행 전체를 멈춘다.
 - 시점: `ts`는 네이버가 준 발행 시각(분 단위)이다. 기사는 **`ts` 다음 분봉부터**, 일봉 전략은 장 마감(15:30 KST) 뒤 기사면 다음 거래일부터 쓴다. 제목·요약은 받을 때의 값이다 (`collected_at`).
 - 과거분은 없다 — 2026-11-18부터 쌓인다. 과거 검증(2012~)에는 빅카인즈 쪽을 쓴다.
 

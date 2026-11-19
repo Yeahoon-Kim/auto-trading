@@ -28,6 +28,7 @@ import sys
 import pandas as pd
 
 from . import store
+from .redact import redact
 
 
 def main() -> None:
@@ -119,7 +120,7 @@ def main() -> None:
         elif src.startswith("us"):
             us_stock.run({"us": "all", "us-daily": "daily", "us-minute": "minute"}[src], a.symbols)
     except Exception as e:  # 수집기 전체가 죽는 오류는 숨기지 않고 알린다
-        notify.send(f"🔴 수집기 중단: {src}\n{type(e).__name__}: {str(e)[:500]}")
+        notify.send(f"🔴 수집기 중단: {src}\n{type(e).__name__}: {redact(e)[:500]}")
         raise
 
 
