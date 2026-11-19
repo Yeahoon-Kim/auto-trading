@@ -1,0 +1,69 @@
+id: L013
+name: kr-ma-support
+version: 1
+status: backtesting
+category: classic
+type: trade
+
+trade:                   # 세 lab(L013·L014·L015) 공통, 결과 보기 전에 정함
+  risk_per_trade_pct: 1.0
+  max_heat_pct: 10.0
+  max_position_pct: 10.0
+  max_sector_pct:
+  max_open_positions: 10
+  kelly: none
+
+market: kr_stock
+universe: ALL            # krx_1d 상장폐지 포함, 유동성 필터는 strategy.py에서 (그날 알 수 있는 값)
+timeframe: 1d
+data_start: "2010-01-01"
+fields: [high, low, volume, value, raw_close]
+fill: next_open
+
+execution:
+  capital:               # 비우면 settings 기본 1,000만 원
+
+data_snapshot: ""
+
+trials:
+  count: 2
+  exposed_from: [L003]   # L003이 같은 개발 구간에서 200일선 돌파·골든크로스·피보나치 반등을 봤음 (통과 0)
+  log:
+    - "2026-11-19 v1: 사전등록 전 코드 점검 중 fit 출력 노출 — 2011-01~2014-01 학습 창 이평별 비용 뒤 평균 R(6개 모두 음수, 가중값 0). 규칙·파라미터 변경 없음"
+    - "2026-11-19 v1: 첫 개발 구간 실행 — lab 엔진(민감도 포함) + placebo.py 시드 20, 사전등록 그대로"
+
+walk_forward:
+  start: "2011-01-01"
+  train: 36M             # fit()이 학습 창 데이터만 받으므로 240일선 이벤트를 1년 이상 보려고 36개월
+  test: 6M
+
+lockbox:
+  start: ""
+  end: ""
+  opened: false
+
+costs:
+  fee_pct:
+  slippage_pct:
+  tax_pct_sell:
+
+params:
+  ma_periods: [5, 10, 20, 60, 120, 240]   # 사용자 지정 (KR)
+  touch_pct: 0.01        # 저가가 이평 + 1% 안까지 내려오면 터치
+  stop_buf: 0.01         # 지지선 아래 1%
+  tgt_buf: 0.005         # 저항 바로 아래 0.5%에서 익절
+  res_n: 60              # 저항 후보: 직전 60봉 고점 (그리고 250봉 고점·위쪽 이평)
+  rr_min: 3.0            # 사용자 지정 손익비
+  max_new: 5             # 하루 새 신호 상한 (점수·거래대금 순)
+  min_value: 1000000000  # 20일 평균 거래대금 10억 원 (L003과 같은 기준)
+  min_price: 1000
+  fit_horizon: 60        # 학습용 결과 시뮬레이션 최대 보유 봉
+  fit_cost: 0.005        # 학습용 왕복 비용 근사 (수수료+슬리피지+매도세)
+  shrink_n: 200          # 가중값 축소: n/(n+200)
+
+benchmark: ""
+
+retirement:
+  max_drawdown_pct:
+  max_losing_days:
+  custom: ""

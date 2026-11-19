@@ -1,0 +1,69 @@
+id: L014-us
+name: us-box-range   # US 참고 실행 (생존편향, 판정 근거 아님)
+version: 1
+status: backtesting
+category: classic
+type: trade
+
+trade:                   # 세 lab(L013·L014·L015) 공통, 결과 보기 전에 정함
+  risk_per_trade_pct: 1.0
+  max_heat_pct: 10.0
+  max_position_pct: 10.0
+  max_sector_pct:
+  max_open_positions: 10
+  kelly: none
+
+market: us_stock
+universe: ALL            # us_1d = S&P500·Nasdaq100 현재 구성종목 → 생존편향 있음
+timeframe: 1d
+data_start: "2010-01-01"
+fields: [high, low, volume, raw_close]
+fill: next_open
+
+execution:
+  capital: 10000          # USD
+
+paper:
+  krw_per_unit: 1400     # 주문 상한 기록 환산용 고정 환율
+
+data_snapshot: ""
+
+trials:
+  count: 1
+  exposed_from: [L003, L014]   # L003 US 결과 + 같은 규칙의 KR lab
+  log:
+    - "2026-11-19 v1: US 참고 첫 실행 — lab 엔진(민감도 포함) + placebo.py 시드 20 (KR 결과 보기 전에 함께 시작)"
+
+walk_forward:
+  start: "2011-01-01"
+  train: 36M             # 세 lab 같은 창
+  test: 6M
+
+lockbox:
+  start: ""
+  end: ""
+  opened: false
+
+costs:
+  fee_pct:
+  slippage_pct:
+  tax_pct_sell:
+
+params:
+  box_n: 60              # 박스 길이 (약 3개월)
+  quiet: 10              # 최근 10봉 안에 새 고점·저점 없음
+  max_width: 0.30        # 박스 폭 (상단/하단 − 1) 상한
+  zone: 0.03             # 저가가 하단 + 3% 안
+  stop_buf: 0.01
+  tgt_buf: 0.01          # 상단 1% 아래에서 익절
+  rr_min: 3.0
+  max_new: 5
+  min_value: 10000000   # 20일 평균 거래대금 1,000만 달러
+  min_price: 5
+
+benchmark: SPY_tr_wht
+
+retirement:
+  max_drawdown_pct:
+  max_losing_days:
+  custom: ""
