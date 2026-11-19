@@ -335,3 +335,149 @@ class _FixedDT:
 
     def now(self, tz=None):
         return self._t
+
+
+# ── 뉴스 과거 백필 ──
+BF = {"enabled": True, "templates": ["{name} 특징주"], "max_calls_per_day": 1000, "max_calls_per_month": 5000,
+      "search_day_ceiling": 2000, "max_attempts": 2}
+
+
+def _krx(rows):
+    """rows: (KST 날짜, 종목코드, 이름). krx_1d를 임시 data에 쓴다."""
+    df = pd.DataFrame(rows, columns=["day", "symbol", "name"])
+    df["ts"] = pd.to_datetime(df["day"]).dt.tz_localize("Asia/Seoul").dt.tz_convert("UTC")
+    store.write("krx_1d", "ALL", df.drop(columns="day").assign(close=1.0), key=["ts", "symbol"])
+
+
+def _bf_cfg(monkeypatch, **kw):
+    cfg = {"naver": {**CFG["naver"], "news_backfill": {**BF, **kw}}}
+    monkeypatch.setattr(naver, "config", lambda: cfg)
+
+
+def _by_query(arts: dict[str, int]):
+    """질의별 기사 수 → 그 수만큼 최신순 기사 (total = 그 수)."""
+    t0 = pd.Timestamp("2026-11-18 17:18")
+    pools = {q: [_item(hash(q) % 1000 * 10_000 + i, t0 - pd.Timedelta(days=i)) for i in range(k)]
+             for q, k in arts.items()}
+
+    def h(req):
+        return _news_handler(pools.get(req.url.params["query"], []))(req)
+    return h
+
+
+def test_name_history_old_names_and_shared_names():
+    _krx([("2011-01-03", "000040", "옛이름"), ("2014-04-17", "000040", "새이름"), ("2020-01-02", "000040", "새이름"),
+          ("2012-01-02", "123450", "같은이름"), ("2019-01-02", "999990", "같은이름"), ("2012-01-02", "000045", "새이름우")])
+    h = naver.name_history().set_index("name")
+    assert h.loc["옛이름", "symbols"] == "000040" and h.loc["옛이름", "last"] == "2011-01-03"
+    assert h.loc["새이름", "first"] == "2014-04-17" and h.loc["새이름", "last"] == "2020-01-02"
+    assert h.loc["같은이름", "symbols"] == "123450|999990"  # 같은 이름은 질의 하나
+    assert "새이름우" in h.index  # 우선주도 대상
+
+
+def test_backfill_all_pages_total_truncation_and_resume(monkeypatch):
+    _bf_cfg(monkeypatch)
+    _krx([("2011-01-03", "000040", "작은"), ("2015-01-05", "000040", "큰"), ("2012-01-02", "000050", "없음")])
+    log = _mock(monkeypatch, _by_query({"작은 특징주": 250, "큰 특징주": 1500, "없음 특징주": 0}))
+    n, failed = naver.collect_backfill(H)
+    assert failed == []
+    starts = {}
+    for r in log:
+        starts.setdefault(r.url.params["query"], []).append(int(r.url.params["start"]))
+    assert starts["작은 특징주"] == [1, 101, 201] and starts["없음 특징주"] == [1]
+    assert starts["큰 특징주"] == naver.page_starts(11)  # start ≤ 1000
+    assert all(int(r.url.params["display"]) == 100 and r.url.params["sort"] == "date" for r in log)
+    q = naver.backfill_queries().set_index("query")
+    assert q.loc["작은 특징주", "total"] == 250 and q.loc["작은 특징주", "got"] == 250
+    assert q.loc["작은 특징주", "truncated"] == 0 and q.loc["큰 특징주", "truncated"] == 1
+    assert q.loc["큰 특징주", "got"] == 1100 and q.loc["없음 특징주", "status"] == "done"
+    df = store.read(naver.BACKFILL_DS, "ALL")
+    assert n == len(df) == 250 + 1099  # 1,000번째 쪽 1건 겹침 제거
+    assert set(df["query_kind"]) == {"backfill"} and set(df.loc[df["query"] == "큰 특징주", "symbol"]) == {"000040"}
+    assert {"ts", "title", "summary", "link", "originallink", "domain", "collected_at"} <= set(df.columns)
+    assert naver.calls("news_backfill")[0] == len(log) and naver.calls("news")[0] == 0  # 장부 따로
+    # 이어받기: 끝난 질의는 다시 부르지 않는다
+    log2 = _mock(monkeypatch, _by_query({}))
+    assert naver.collect_backfill(H) == (0, []) and log2 == []
+
+
+def test_backfill_daily_cap_stops_and_resumes(monkeypatch):
+    _bf_cfg(monkeypatch, max_calls_per_day=4)
+    _today(monkeypatch, "2026-11-18")
+    _krx([("2011-01-03", f"00{i}000", f"종목{i}") for i in range(3)])
+    _mock(monkeypatch, _by_query({f"종목{i} 특징주": 250 for i in range(3)}))
+    naver.collect_backfill(H)
+    q = naver.backfill_queries()
+    assert len(q) == 1 and naver.calls("news_backfill")[0] == 4  # 3쪽짜리 1개 끝, 2번째는 중간에 멈춤(저장 안 함)
+    _today(monkeypatch, "2026-11-19")
+    naver.collect_backfill(H)
+    _today(monkeypatch, "2026-11-20")
+    naver.collect_backfill(H)
+    q = naver.backfill_queries()
+    assert len(q) == 3 and (q["status"] == "done").all() and (q["got"] == 250).all()
+
+
+def test_backfill_ceiling_protects_live(monkeypatch):
+    """오늘 live가 이미 많이 썼으면 백필은 천장에서 멈춘다 (live 몫 보호)."""
+    _bf_cfg(monkeypatch, search_day_ceiling=5)
+    _today(monkeypatch, "2026-11-18")
+    for _ in range(4):
+        naver._count("news")
+    _krx([("2011-01-03", "000040", "작은")])
+    log = _mock(monkeypatch, _by_query({"작은 특징주": 250}))
+    naver.collect_backfill(H)
+    assert len(log) == 1 and naver.backfill_queries().empty
+
+
+def test_backfill_failed_query_retries_up_to_max(monkeypatch):
+    _bf_cfg(monkeypatch)
+    _krx([("2011-01-03", "000040", "나쁨"), ("2011-01-03", "000050", "좋음")])
+    good = _by_query({"좋음 특징주": 50})
+
+    def h(req):
+        if req.url.params["query"] == "나쁨 특징주":
+            return httpx.Response(400, json={"errorMessage": "Invalid query", "errorCode": "SE01"})
+        return good(req)
+    log = _mock(monkeypatch, h)
+    n, failed = naver.collect_backfill(H)
+    assert n == 50 and len(failed) == 1 and failed[0].startswith("나쁨 특징주")
+    naver.collect_backfill(H)
+    naver.collect_backfill(H)  # max_attempts=2 → 세 번째에는 부르지 않는다
+    assert sum(r.url.params["query"] == "나쁨 특징주" for r in log) == 2
+    q = naver.backfill_queries().set_index("query")
+    assert q.loc["나쁨 특징주", "status"] == "error" and q.loc["나쁨 특징주", "attempts"] == 2
+
+
+def test_backfill_billing_stop(monkeypatch):
+    _bf_cfg(monkeypatch)
+    monkeypatch.setattr(naver, "keys", lambda: H)
+    _krx([("2011-01-03", "000040", "작은")])
+    _mock(monkeypatch, lambda req: httpx.Response(402, text="유료 전환 안내: 결제 수단을 등록하세요"))
+    with pytest.raises(naver.NaverStop):
+        naver.run_news_backfill()
+    assert naver.runs(naver.BACKFILL_DS)["status"].tolist() == ["error"]
+    assert store.get_state(naver.BACKFILL_DS, "ALL")["status"] == "error"
+
+
+def test_run_news_does_live_first_then_backfill(monkeypatch):
+    _bf_cfg(monkeypatch)
+    monkeypatch.setattr(naver, "keys", lambda: H)
+    _krx([("2011-01-03", "000040", "작은")])
+    log = _mock(monkeypatch, _by_query({"테마주": 30, "작은 특징주": 20}))
+    naver.run_news()
+    assert [r.url.params["query"] for r in log] == ["테마주", "작은 특징주"]
+    assert naver.runs()["dataset"].tolist() == [naver.NEWS_DS, naver.BACKFILL_DS]
+    # live가 멈추면 백필은 하지 않는다
+    log2 = _mock(monkeypatch, lambda req: httpx.Response(401, json={"error": {"message": "Authentication Failed"}}))
+    with pytest.raises(naver.NaverStop):
+        naver.run_news()
+    assert all(r.url.params["query"] == "테마주" for r in log2)
+
+
+def test_backfill_budget_in_real_config_protects_live():
+    """실제 config: live 상한 + 백필 상한 ≤ 천장 < 공식 하루 한도 25,000."""
+    from autotrader.data.collectors.common import config as real_config
+    c = real_config()["naver"]
+    bf = c["news_backfill"]
+    assert c["news"]["max_calls_per_day"] + bf["max_calls_per_day"] <= bf["search_day_ceiling"]
+    assert bf["search_day_ceiling"] + c["news"]["max_calls_per_day"] <= 25_000

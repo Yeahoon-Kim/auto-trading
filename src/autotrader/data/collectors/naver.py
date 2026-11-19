@@ -34,6 +34,16 @@
   - 한 질의가 실패해도(400 등) 그 질의만 건너뛰고 다음 질의로 간다. 실패한 질의는 받은 쪽까지 저장하되 '마지막 기사
     시각'을 올리지 않아 다음 실행이 처음부터 다시 받는다. 실행 기록 status는 'partial'. 과금·인증(NaverStop)과
     호출 한도(DailyLimit)는 질의가 아니라 실행 전체를 멈춘다. 질의가 모두 실패하면 오류로 멈춘다(알림).
+
+── naver_news_backfill (symbol=ALL) — 과거 백필 (전략부 L004 요청, 2026-11-19) ──
+  열은 naver_news_live와 같다. query_kind='backfill', symbol = 그 이름을 쓴 종목코드('|'로 여럿일 수 있음).
+  - 질의: naver.news_backfill.templates("{name} 특징주") × krx_1d에 나온 모든 종목명(그날 이름 = 그 시절 이름,
+    상장폐지·우선주 포함, 이름이 바뀐 종목은 이름마다). 같은 이름을 여러 종목이 썼으면 질의는 하나.
+  - 질의마다 최신순으로 모든 쪽(1, 101, …, 901, 1000)을 받는다. total(네이버 전체 건수)이 1,099를 넘으면 오래된
+    쪽이 잘린다 → 질의 장부(state.sqlite naver_backfill_query, `backfill_queries()`)에 truncated=1.
+  - 이어받기: 끝난 질의(status=done)는 건너뛴다. 실패 질의는 max_attempts번까지 다음 실행에 다시.
+  - 호출 수는 장부 'news_backfill'로 따로 센다. 하루·월 상한 + 검색 API 오늘 합계(live+백필) 천장.
+    `collect naver-news`가 live를 먼저 끝낸 뒤 같은 실행에서 백필한다 (live가 먼저 쓰고 남는 몫).
 """
 
 from __future__ import annotations
@@ -125,6 +135,11 @@ def _check_limit(api: str) -> None:
     if d >= c["max_calls_per_day"] or m >= c["max_calls_per_month"]:
         raise DailyLimit(f"naver {api} 호출 한도 도달 (오늘 {d:,}/{c['max_calls_per_day']:,},"
                          f" 이번 달 {m:,}/{c['max_calls_per_month']:,})")
+    if api == "news_backfill":  # 백필은 live와 같은 검색 API 하루 한도를 나눠 쓴다 → 합계가 천장에 닿으면 멈춘다
+        live = calls("news")[0]
+        if live + d >= c["search_day_ceiling"]:
+            raise DailyLimit(f"naver 검색 API 오늘 합계 {live + d:,} ≥ 백필 천장 {c['search_day_ceiling']:,}"
+                             " (live 몫 보호)")
 
 
 def _request(api: str, method: str, url: str, headers: dict, **kw) -> dict:
@@ -285,12 +300,14 @@ def page_starts(max_pages: int) -> list[int]:
     return out
 
 
-def _news_page(query: str, start: int, headers: dict) -> tuple[pd.DataFrame, int]:
-    j = _request("news", "GET", NEWS_URL, headers,
+def _news_page(query: str, start: int, headers: dict, api: str = "news") -> tuple[pd.DataFrame, int, int]:
+    """(기사, 이 쪽 건수, 질의 전체 건수 total). api = 호출 수를 셀 장부 이름(news | news_backfill)."""
+    j = _request(api, "GET", NEWS_URL, headers,
                  params={"query": query, "display": NEWS_PAGE, "start": start, "sort": "date"})
     items = j.get("items") or []
+    total = int(j.get("total") or 0)
     if not items:
-        return pd.DataFrame(), 0
+        return pd.DataFrame(), 0, total
     d = pd.DataFrame(items)
     out = pd.DataFrame({
         "ts": pd.to_datetime(d["pubDate"], format="%a, %d %b %Y %H:%M:%S %z").dt.tz_convert("UTC"),
@@ -298,7 +315,7 @@ def _news_page(query: str, start: int, headers: dict) -> tuple[pd.DataFrame, int
         "link": d["link"].fillna(""), "originallink": d["originallink"].fillna(""),
     })
     out["domain"] = [urlparse(o or l).hostname or "" for o, l in zip(out["originallink"], out["link"], strict=True)]
-    return out, len(items)
+    return out, len(items), total
 
 
 def surge_queries(pct: float, max_n: int) -> pd.DataFrame:
@@ -326,7 +343,7 @@ def _news_query(query: str, kind: str, symbol: str, max_pages: int, headers: dic
     parts, caught_up, err, starts = [], last is None, "", page_starts(max_pages)
     for start in starts:
         try:
-            df, cnt = _news_page(query, start, headers)
+            df, cnt, _ = _news_page(query, start, headers)
         except (NaverStop, DailyLimit):
             raise
         except Exception as e:  # noqa: BLE001 — 400(요청 형식)·재시도 소진 등 → 이 질의만 건너뛴다
@@ -361,9 +378,9 @@ def _mark_queries(df: pd.DataFrame) -> None:
             con.execute("INSERT OR REPLACE INTO naver_news_query VALUES (?,?,?)", (q, last.isoformat(), now))
 
 
-def _new_rows(df: pd.DataFrame) -> int:
+def _new_rows(df: pd.DataFrame, ds: str = NEWS_DS) -> int:
     """이미 저장된 (link, query)를 뺀 새 행 수 (수집 기록의 '받은 건수')."""
-    folder = store.DATA_DIR / NEWS_DS / SYMBOL
+    folder = store.DATA_DIR / ds / SYMBOL
     old = set()
     for y in df["ts"].dt.strftime("%Y").unique():
         f = folder / f"{y}.parquet"
@@ -404,8 +421,124 @@ def collect_news(headers: dict) -> tuple[int, list[str]]:
     return n, errs
 
 
+# ── 뉴스 과거 백필 (naver_news_backfill) ──
+BACKFILL_DS = "naver_news_backfill"
+BACKFILL_REACH = page_starts(11)[-1] + NEWS_PAGE - 1  # 질의당 받을 수 있는 최대 건수 (1,099)
+_BF_COLS = ("query", "name", "symbols", "name_first", "name_last", "total", "got", "pages", "truncated", "status",
+            "attempts", "error", "done_at")
+
+
+def _bf_table(con: sqlite3.Connection) -> None:
+    con.execute("CREATE TABLE IF NOT EXISTS naver_backfill_query (query TEXT PRIMARY KEY, name TEXT, symbols TEXT,"
+                " name_first TEXT, name_last TEXT, total INTEGER, got INTEGER, pages INTEGER, truncated INTEGER,"
+                " status TEXT, attempts INTEGER, error TEXT, done_at TEXT)")
+
+
+def name_history() -> pd.DataFrame:
+    """krx_1d의 그날 종목명(= 그 시절 이름)별: name, symbols(같은 이름을 쓴 종목코드 '|'), first·last(그 이름이 보인
+    첫·마지막 거래일, KST 'YYYY-MM-DD'). krx_1d는 2010~이라 2010 전에 바뀐 옛 이름은 없다."""
+    files = sorted((store.DATA_DIR / "krx_1d" / SYMBOL).glob("*.parquet"))
+    if not files:
+        return pd.DataFrame(columns=["name", "symbols", "first", "last"])
+    d = pd.concat([pd.read_parquet(f, columns=["ts", "symbol", "name"]) for f in files], ignore_index=True)
+    d["name"] = d["name"].astype(str).str.strip()
+    d = d[d["name"] != ""]
+    d["day"] = d["ts"].dt.tz_convert(KST).dt.strftime("%Y-%m-%d")
+    g = d.groupby("name").agg(symbols=("symbol", lambda s: "|".join(sorted(set(s)))),
+                              first=("day", "min"), last=("day", "max")).reset_index()
+    return g.sort_values(["symbols", "first"]).reset_index(drop=True)
+
+
+def backfill_queries() -> pd.DataFrame:
+    """백필 질의 장부. 열: query, name, symbols, name_first·name_last(그 이름을 쓴 기간), total(네이버 전체 건수),
+    got(받은 건수), pages(호출 쪽 수), truncated(1 = total이 받을 수 있는 1,099건을 넘어 오래된 기사가 잘림),
+    status(done | error), attempts, error, done_at(UTC)."""
+    with _ledger() as con:
+        _bf_table(con)
+        return pd.read_sql("SELECT * FROM naver_backfill_query ORDER BY query", con)
+
+
+def _bf_fetch(query: str, headers: dict) -> tuple[list[pd.DataFrame], int, int, str]:
+    """한 질의의 모든 쪽 (최신순). (쪽들, total, 호출 쪽 수, 오류). NaverStop·DailyLimit은 그대로 올린다."""
+    parts, total, pages = [], None, 0
+    for start in page_starts(11):
+        if total is not None and start > total:
+            break
+        try:
+            df, cnt, tot = _news_page(query, start, headers, api="news_backfill")
+        except (NaverStop, DailyLimit):
+            raise
+        except Exception as e:  # noqa: BLE001 — 400 등 → 이 질의만 건너뛴다 (다음 실행에 다시, max_attempts까지)
+            return parts, total or 0, pages, f"{type(e).__name__}: {e}"
+        pages += 1
+        total = tot if total is None else total
+        if not df.empty:
+            parts.append(df)
+        if cnt < NEWS_PAGE:
+            break
+    return parts, total or 0, pages, ""
+
+
+def collect_backfill(headers: dict) -> tuple[int, list[str]]:
+    """(새로 저장한 행 수, 실패한 질의 '질의: 오류'). 이름 × 질의 틀마다 모든 쪽을 받는다. 끝난 질의는 건너뛴다."""
+    c = config()["naver"]["news_backfill"]
+    hist = name_history()
+    if hist.empty:
+        logger.info(f"{BACKFILL_DS}: krx_1d 없음 → 건너뜀")
+        return 0, []
+    max_att = int(c.get("max_attempts", 3))
+    with _ledger() as con:
+        _bf_table(con)
+        seen = {q: (s, a) for q, s, a in con.execute("SELECT query, status, attempts FROM naver_backfill_query")}
+    todo = []
+    for t in c.get("templates") or ["{name} 특징주"]:
+        for r in hist.itertuples(index=False):
+            q = t.format(name=r.name)
+            st, att = seen.get(q, ("", 0))
+            if st != "done" and att < max_att:
+                todo.append((q, r, att))
+    logger.info(f"{BACKFILL_DS}: 남은 질의 {len(todo):,}개 (끝난 질의 {sum(s == 'done' for s, _ in seen.values()):,}개)")
+    buf, meta, n, failed = [], [], 0, []
+
+    def flush() -> None:
+        nonlocal buf, meta, n
+        if buf:
+            df = pd.concat(buf, ignore_index=True).drop_duplicates(["link", "query"])
+            n += _new_rows(df, BACKFILL_DS)
+            store.write(BACKFILL_DS, SYMBOL, df, key=["link", "query"])
+        with _ledger() as con:  # 저장한 뒤에 질의를 끝냄으로 표시 (저장 실패 시 다음 실행이 다시 받게)
+            con.executemany(f"INSERT OR REPLACE INTO naver_backfill_query VALUES ({','.join('?' * len(_BF_COLS))})",
+                            [tuple(m[k] for k in _BF_COLS) for m in meta])
+        buf, meta = [], []
+
+    try:
+        for q, r, att in todo:
+            parts, total, pages, err = _bf_fetch(q, headers)
+            got = sum(len(p) for p in parts)
+            now = datetime.now(UTC).isoformat(timespec="seconds")
+            meta.append({"query": q, "name": r.name, "symbols": r.symbols, "name_first": r.first, "name_last": r.last,
+                         "total": total, "got": got, "pages": pages, "truncated": int(total > BACKFILL_REACH),
+                         "status": "error" if err else "done", "attempts": att + 1, "error": redact(err)[:300],
+                         "done_at": now})
+            if parts:  # 실패 질의도 받은 쪽은 저장 (다시 받으면 (link, query)로 겹침 제거)
+                buf.append(pd.concat(parts, ignore_index=True).assign(
+                    query=q, query_kind="backfill", symbol=r.symbols, collected_at=pd.Timestamp(now)))
+            if err:
+                failed.append(f"{q}: {err}")
+                logger.error(f"{BACKFILL_DS} '{q}' 실패 ({att + 1}/{max_att}회): {err}")
+            if len(meta) >= 200:
+                flush()
+    except DailyLimit as e:
+        logger.info(f"{e} → 다음 실행에 이어받기")
+    finally:
+        flush()
+    d, m = calls("news_backfill")
+    logger.info(f"{BACKFILL_DS}: 새 기사 {n:,}행 (실패 질의 {len(failed)}), 호출 오늘 {d:,} / 이번 달 {m:,}")
+    return n, failed
+
+
 # ── 수집 기록 (state.sqlite의 naver_runs 표) — 빠진 날을 나중에 찾기 위해 실행마다 1행 ──
-API_OF = {TREND_DS: "trend", NEWS_DS: "news"}
+API_OF = {TREND_DS: "trend", NEWS_DS: "news", BACKFILL_DS: "news_backfill"}
 
 
 def _record(ds: str, started: datetime, status: str, rows: int, calls_before: int, error: str = "") -> None:
@@ -492,5 +625,14 @@ def run_trend(symbols: list[str] | None = None) -> None:
 
 
 def run_news(symbols: list[str] | None = None) -> None:
+    """앞으로 수집(live)을 먼저 끝내고, naver.news_backfill.enabled면 같은 실행에서 남은 몫으로 과거 백필.
+    live가 오류로 멈추면 백필은 하지 않는다 (예외가 그대로 올라감)."""
     _run(NEWS_DS, collect_news)
+    if (config()["naver"].get("news_backfill") or {}).get("enabled"):
+        _run(BACKFILL_DS, collect_backfill)
+
+
+def run_news_backfill(symbols: list[str] | None = None) -> None:
+    """백필만 (수동 실행용). 하루 상한·천장은 같은 config를 따른다."""
+    _run(BACKFILL_DS, collect_backfill)
 
