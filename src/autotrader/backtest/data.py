@@ -754,7 +754,7 @@ def fin_reports(symbols=None, asof=None, timing: str = "first") -> pd.DataFrame:
     src_date(공개일, 현지 날짜), known(이 날짜 봉부터 쓸 수 있음 = src_date 다음 날 → 다음 거래일 봉),
     flow_known(손익을 쓸 수 있는 날), FIN_BS 원천 열, FIN_FLOW 3개월 값,
     fallback(최초 접수일이 없어 filed 사용), corrected(최초 접수 뒤 정정됨).
-    FY 행의 손익은 4분기 3개월 값(FY − Q3 누적)으로 바꾼다. 그 flow_known은 사업보고서·3분기보고서 중 늦은 공개일
+    FY 행의 손익은 4분기 3개월 값(FY − Q3 누적)으로 바꾼다 (FY·Q3의 fs_div가 다르면 NaN). 그 flow_known은 사업보고서·3분기보고서 중 늦은 공개일
     다음 날, 재무상태(known)는 사업보고서 공개일 다음 날. 원화 아닌 보고서는 뺀다.
     asof: 그날 전에 공개된 행만 (src_date < asof)."""
     if timing not in FIN_TIMING:
@@ -806,8 +806,11 @@ def fin_reports(symbols=None, asof=None, timing: str = "first") -> pd.DataFrame:
     m.index = fy.index
     rows = rows.copy()
     rows["flow_src"] = rows["src_date"]
+    # FY와 Q3의 재무제표 구분(fs_div: 연결 CFS / 별도 OFS)이 다르면 빼지 않는다 → 4분기 손익 NaN.
+    # dart_fin은 보고서마다 연결 우선으로 한 기준만 저장하므로 같은 기준 값을 대신 구할 수 없다 (2026-11-19, 약 335건)
+    same = m["fs_div"].isna() | (m["fs_div"] == fy["fs_div"])
     for c in FIN_FLOW:
-        rows.loc[fy.index, c] = fy[c] - m[f"{c}_cum"]
+        rows.loc[fy.index, c] = (fy[c] - m[f"{c}_cum"]).where(same)
     later = m["src_date"].notna() & (m["src_date"] > fy["src_date"])
     rows.loc[fy.index[later], "flow_src"] = m.loc[later, "src_date"]
     rows.loc[fy.index[m["src_date"].isna()], "flow_src"] = pd.NaT    # 3분기보고서가 없으면 4분기 손익은 알 수 없음
