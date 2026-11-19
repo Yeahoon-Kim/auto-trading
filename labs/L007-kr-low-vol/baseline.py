@@ -75,7 +75,7 @@ def main(out: Path) -> None:
 
     counts = (w > 0).sum(axis=1)
     rng = np.random.default_rng(SEED)
-    rand = []
+    rand, rand_w = [], []
     for i in range(N_RANDOM):
         rows = {}
         for d in dates:
@@ -87,7 +87,9 @@ def main(out: Path) -> None:
                 row[pick] = 1.0 / len(pick)
             rows[d] = row
         rw = pd.DataFrame.from_dict(rows, orient="index", columns=panel.close.columns)
-        rand.append(stats(run(rw).returns, year, rf))
+        rr = run(rw).returns
+        rand.append(stats(rr, year, rf))
+        rand_w.append((1 + rr).cumprod().to_numpy())
 
     k = kospi(test.index)
     kr = k.pct_change().fillna(0.0)
@@ -113,6 +115,14 @@ def main(out: Path) -> None:
                        "equal_weight": (1 + b).groupby(b.index.year).prod() - 1,
                        "kospi": (1 + kr).groupby(kr.index.year).prod() - 1})
     report["yearly"] = {str(y): {c: float(v) for c, v in row.items()} for y, row in yr.iterrows()}
+    # 그림용 일간 수익·무작위 누적가치 분위 (2026-11-20 추가, 판정과 무관)
+    idx = res["strategy"].returns.index
+    curves = pd.DataFrame({"strategy": res["strategy"].returns, "equal_weight": res["equal_weight_universe"].returns,
+                           "kospi": kr.reindex(idx).fillna(0.0)}, index=idx)
+    rw_ = np.vstack([np.asarray(x, dtype=float) for x in rand_w])
+    for q in (5, 50, 95):
+        curves[f"random_wealth_p{q}"] = np.percentile(rw_, q, axis=0)
+    curves.to_parquet(out / "baseline_returns.parquet")
     (out / "baseline.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def line(name, d):

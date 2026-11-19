@@ -58,6 +58,8 @@ def main(out: Path) -> None:
                        "proxy_hold": (1 + rh.returns).groupby(rh.returns.index.year).prod() - 1,
                        "kospi": (1 + k).groupby(k.index.year).prod() - 1})
     rep["yearly"] = {str(y): {c: float(v) for c, v in r.items()} for y, r in yr.iterrows()}
+    # 그림용 일간 수익 (2026-11-20 추가, 판정과 무관)
+    pd.DataFrame({"strategy": rs.returns, "proxy_hold": rh.returns, "kospi": k.reindex(rs.returns.index).fillna(0.0)}).to_parquet(out / "baseline_returns.parquet")
     (out / "baseline.json").write_text(json.dumps(rep, ensure_ascii=False, indent=2), encoding="utf-8")
     md = [f"# 비교 기준 ({rep['test_period'][0]} ~ {rep['test_period'][1]})", "", "| | Sharpe | CAGR | MDD |", "|---|---|---|---|"]
     for n, key in (("전략", "strategy"), ("전략 비용 2배", "strategy_cost_x2"), ("대리 포트폴리오 보유", "proxy_hold"),

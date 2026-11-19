@@ -91,6 +91,7 @@ def main(out: Path) -> None:
         "yearly": {str(y): {"strategy": float(a), "size_matched": float(b)}
                    for y, a, b in zip(yr(strat.returns).index, yr(strat.returns), yr(size.returns))},
     }
+    pd.DataFrame({"size_matched": size.returns}).to_parquet(out / "diagnostic_size_returns.parquet")  # 그림용
     (out / "diagnostic_size.json").write_text(json.dumps(rep, ensure_ascii=False, indent=2), encoding="utf-8")
     f = lambda d: f"{d['sharpe']:.2f} | {d['cagr']:.1%} | {d['mdd']:.1%}"
     md = [f"# 진단용 — 시총 분포 맞춘 동일가중 ({rep['test_period'][0]} ~ {rep['test_period'][1]}, 비용 포함)",
