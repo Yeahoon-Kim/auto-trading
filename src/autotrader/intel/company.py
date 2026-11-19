@@ -103,9 +103,13 @@ def _fund_dart(sym: str, asof: pd.Timestamp) -> pd.DataFrame:
                          **{k: a[k] for k in ("effective_date", "known_from", *FLOW, *BS) if k in a}})
             if "Q3" in by:  # 4분기 보고서는 없다 → 연간 − 3분기 누적 (공개 시점은 사업보고서 접수일)
                 q3 = by["Q3"]
-                rows.append({"period_label": f"{y}Q4*", "period_type": "quarterly", "flag": "FY−Q3누적",
+                # 연결(CFS)·별도(OFS) 기준이 다르면 빼지 않는다 (backtest/data.py fin_reports와 같은 규칙)
+                same = a.get("fs_div") == q3.get("fs_div")
+                rows.append({"period_label": f"{y}Q4*", "period_type": "quarterly",
+                             "flag": "FY−Q3누적" if same else "FY·Q3 연결/별도 다름→손익 없음",
                              "effective_date": a["effective_date"], "known_from": a["known_from"],
-                             **{k: a[k] - q3[f"{k}_cum"] for k in FLOW}, **{k: a[k] for k in BS if k in a}})
+                             **{k: a[k] - q3[f"{k}_cum"] if same else float("nan") for k in FLOW},
+                             **{k: a[k] for k in BS if k in a}})
     f = pd.DataFrame(rows)
     f["eps"] = float("nan")
     f["source"] = "DART"
