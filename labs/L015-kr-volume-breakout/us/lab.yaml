@@ -30,7 +30,7 @@ data_snapshot: ""
 
 trials:
   count: 1
-  exposed_from: [L003, L015]   # L003 US 결과 + 같은 규칙의 KR lab
+  exposed_from: [L003, L011, L015]   # L003 US 결과 + 같은 규칙의 KR lab
   log:
     - "2026-11-19 v1: US 참고 첫 실행 — lab 엔진(민감도 포함) + placebo.py 시드 20 (KR 결과 보기 전에 함께 시작)"
 
