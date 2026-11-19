@@ -1,7 +1,7 @@
 id: L011
 name: kr-52w-high
 version: 1               # 잠금 구간을 본 뒤 전략을 고치면 +1 하고 다시 검증
-status: backtesting            # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
+status: validating             # draft | backtesting | validating | validated | rejected | needs-more | paper | live | retired
 category: classic        # classic | intraday | algo | arbitrage | llm  (연구 분류)
 type: portfolio          # 실행 유형 (docs/architecture.md §10). 비우면 portfolio
                          #   portfolio: generate_signals()가 날짜×종목 목표 비중을 낸다. 비중이 곧 사이징 (종목 수·비중은 전략이 정함)
