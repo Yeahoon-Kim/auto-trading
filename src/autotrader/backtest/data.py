@@ -1140,7 +1140,15 @@ def check_mcap_causality(panel: Panel, n_cuts: int = 3, tol: float = 1e-9) -> di
     앞 채택값을 바꾸면 어긋난다)."""
     fields = [f for f in US_MCAP_FIELDS if f in panel]
     out = {"passed": True, "fields": fields, "cuts": []}
-    if not fields or panel.mcap_source is None or panel.mcap_basis is None:
+    if not fields:
+        return out
+    if panel.mcap_source is None or panel.mcap_basis is None:
+        # 재구성할 원천이 없다 (kr_stock: market_cap·shares는 krx_1d 그날 행의 값을 그대로 쓴다 — 다시 만들 것이 없음).
+        # 검사하지 않았으므로 통과로 적지 않는다. 그날 종가 시점 값이라 신호에 쓰는 미래참조는 신호 cut 검사
+        # (engine.check_causality)가 본다. 원천 값 자체가 나중에 고쳐 쓴 값인지는 이 검사로 알 수 없다.
+        out.update(passed=None, reason=("kr_stock 시가총액·주식수는 krx_1d 당일 원천 값 그대로라 재구성 비교 대상 없음 "
+                                        "(신호의 미래참조는 신호 cut 검사가 확인)" if panel.market == "kr_stock"
+                                        else "시가총액 원천을 불러오지 않아 재구성 비교를 하지 못함"))
         return out
     idx, basis = panel.index, panel.mcap_basis
     for q in np.linspace(0.4, 0.85, n_cuts):

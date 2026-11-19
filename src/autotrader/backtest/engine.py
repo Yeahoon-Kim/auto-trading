@@ -11,6 +11,8 @@ lab의 strategy.py는 generate_signals(data, params)로 '봉 t 종가 시점에 
 - 신호 표에 없는 날짜는 직전 비중 유지(ffill), 처음 신호 전은 0. NaN 비중은 0.
 - 체결 가격이 없는 종목(거래정지 등)은 그 봉에 매매하지 않고 기존 보유 유지.
   panel에 "tradable"(날짜×종목 bool)이 있으면 False인 날도 매매하지 않는다 (kr_stock: 거래량 0인 날 — 종가가 직전 값 복사라 next_close에서도 막는다).
+  팔 수 없는 보유가 남은 봉에서 목표가 롱만·합 ≤ 1이면, 나머지 매수를 줄여 비중 합이 1을 넘지 않게 한다
+  (2026-11-19부터. 전에는 잔량 + 목표 비중을 그대로 사 합이 1을 넘었다 = 빚내서 산 셈). Result.meta["frozen_capped_bars"]에 횟수.
 - 상장폐지(마지막 가격 이후 데이터 없음): 마지막 가격 다음 봉에 그 가격으로 강제 청산 (비용·세금 부과).
   실제 정리매매는 더 낮은 값에 팔리는 경우가 많아 이 가정은 낙관적이다 — krx_1d에 정리매매 시세가 있으면 그만큼은 반영된다.
 비용 (Costs, 모두 %)
@@ -249,7 +251,7 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
     held = np.zeros((hi - lo, k))
     sh_s = np.zeros((hi - lo, k)) if whole_shares else None
     sh = np.zeros(k)                # whole_shares: 보유 주식 수
-    trades = forced = 0
+    trades = forced = frozen_capped = 0
     fee = costs.per_trade
 
     def drift(h, r):
@@ -281,6 +283,7 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
             g = np.nan_to_num(c[t] / prev_c - 1)
             trade_ok = (~np.isnan(c[t]) & tr[t]) | dead
             seg2 = np.zeros(k)
+        frozen = ~trade_ok & (h > EPS)       # 거래정지 등으로 이 봉에 팔 수 없는 롱 보유
         g[dead] = 0.0
         px = np.where(np.isnan(px), last_px, px)            # 상장폐지 청산 가격
         h, p1 = drift(h, g)
@@ -312,6 +315,17 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
             new = np.where(trade_ok, np.nan_to_num(q_want * px / V) if V > EPS else 0.0, h)
         else:
             new = np.where(trade_ok, target, h)
+
+        # 거래정지 잔량: 팔 수 없는 보유를 남긴 채 나머지를 목표대로 사면 비중 합이 1을 넘는다 (돈을 빌린 셈).
+        # 목표가 레버리지를 뜻하지 않을 때(롱만, 합 ≤ 1)는 거래 가능한 매수를 줄여, 잔량이 만든 초과분만큼 덜어 낸다.
+        # (정수 주식은 아래 현금 검사가 같은 일을 한다. on_change처럼 원래 1을 넘을 수 있는 몫은 건드리지 않는다.)
+        if not whole_shares and frozen.any() and (target >= -EPS).all() and target.sum() <= 1 + EPS:
+            over = min(float(new.sum()) - 1.0, float(np.clip(h[frozen] - target[frozen], 0, None).sum()))
+            buy = trade_ok & (new > EPS)
+            nb = float(new[buy].sum())
+            if over > EPS and nb > EPS:
+                new = np.where(buy, new * max(nb - over, 0.0) / nb, new)
+                frozen_capped += 1
 
         if whole_shares and V > EPS:
             cur = np.round(h * V / np.where(px > 0, px, np.inf))       # 지금 보유 주식 수 (정수)
@@ -370,7 +384,8 @@ def run(panel: Panel, weights: pd.DataFrame, costs: Costs, fill: str = "next_ope
         cost=pd.Series(cost_s, sl).iloc[first:], turnover=pd.Series(turn_s, sl).iloc[first:],
         weights=pd.DataFrame(held, sl, w.columns).iloc[first:],
         trades=trades, forced_exits=forced, costs=costs,
-        meta={"fill": fill, "rebalance": rebalance, "whole_shares": whole_shares, "sizing": sizing})
+        meta={"fill": fill, "rebalance": rebalance, "whole_shares": whole_shares, "sizing": sizing,
+              "frozen_capped_bars": frozen_capped})
     if has_f:
         res.funding = pd.Series(fund_s, sl).iloc[first:]
     if money:
