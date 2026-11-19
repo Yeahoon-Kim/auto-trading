@@ -91,3 +91,12 @@ naver:                         # `collect naver-trend`, `collect naver-news` (co
     surge_pct: 15              # krx_1d 최근 거래일 상승률 이 % 이상 종목명도 질의 (상한가 30% 포함)
     max_stock_queries: 60      # 급등 종목 질의 상한 (상승률 큰 순)
     stock_max_pages: 2
+  news_backfill:               # 뉴스 과거 백필 ("{종목명} 특징주", 전 쪽). `collect naver-news`가 live 다음에 같은 실행에서 돈다
+    # 공식 한도(API HUB 문서 2026-09-17판): 검색 API 하루 25,000회 (뉴스·블로그 등 검색 API 합산), 초과 시 429.
+    # 몫: live 하루 상한 3,000 + 백필 8,000 = 11,000 (공식의 44%). 천장 = 오늘 live+백필 합계가 이 값이면 백필만 멈춤.
+    enabled: true
+    templates: ["{name} 특징주"] # 2차로 "{name} 관련주"를 더하면 호출 약 2배
+    max_calls_per_day: 8000
+    max_calls_per_month: 120000
+    search_day_ceiling: 20000  # 25,000 − live 상한 3,000 − 여유 2,000
+    max_attempts: 3            # 400 등으로 실패한 질의를 다시 시도하는 횟수

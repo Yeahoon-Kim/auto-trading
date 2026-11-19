@@ -12,7 +12,8 @@
     uv run python -m autotrader.data.cli collect edgar       # US 재무: SEC EDGAR companyfacts (SEC_USER_AGENT 필요)
     uv run python -m autotrader.data.cli collect us-splits   # US 분할 이력 (Yahoo, 발표일은 Alpaca 2020~)
     uv run python -m autotrader.data.cli collect naver-trend # 네이버 검색어 트렌드 2016~ (NAVER API HUB 키 필요)
-    uv run python -m autotrader.data.cli collect naver-news  # 네이버 뉴스 검색, 지금부터 쌓기 (같은 키)
+    uv run python -m autotrader.data.cli collect naver-news  # 네이버 뉴스 검색, 지금부터 쌓기 + 과거 백필 (같은 키)
+    uv run python -m autotrader.data.cli collect naver-news-backfill  # 과거 백필만 (수동)
     uv run python -m autotrader.data.cli naver-gaps          # 네이버 수집이 빠진 날 (--dataset naver_trend, --since)
     uv run python -m autotrader.data.cli collect binance --symbols BTCUSDT ETHUSDT
     uv run python -m autotrader.data.cli status
@@ -37,11 +38,11 @@ def main() -> None:
     c = sub.add_parser("collect")
     c.add_argument("source", choices=["binance", "upbit", "kr", "kr-daily", "kr-minute", "us", "us-daily",
                                       "us-minute", "us-sip", "news", "macro", "legacy", "kr-public",
-                                      "dividends", "edgar", "us-splits", "naver-trend", "naver-news"])
+                                      "dividends", "edgar", "us-splits", "naver-trend", "naver-news", "naver-news-backfill"])
     c.add_argument("--symbols", nargs="*")
     sub.add_parser("status")
     g = sub.add_parser("naver-gaps", help="네이버 수집 기록에서 빠진 날 찾기")
-    g.add_argument("--dataset", default="naver_news_live", choices=["naver_news_live", "naver_trend"])
+    g.add_argument("--dataset", default="naver_news_live", choices=["naver_news_live", "naver_trend", "naver_news_backfill"])
     g.add_argument("--since", help="KST 날짜 YYYY-MM-DD (기본: 첫 수집일)")
     g.add_argument("--all", action="store_true", help="문제없는 날도 보이기")
     h = sub.add_parser("health")
@@ -108,7 +109,9 @@ def main() -> None:
         elif src == "naver-trend":
             naver.run_trend(a.symbols)
         elif src == "naver-news":
-            naver.run_news(a.symbols)
+            naver.run_news(a.symbols)  # live 다음에 과거 백필 (config naver.news_backfill.enabled)
+        elif src == "naver-news-backfill":
+            naver.run_news_backfill(a.symbols)
         elif src.startswith("kr"):
             kr_stock.run({"kr": "all", "kr-daily": "daily", "kr-minute": "minute"}[src], a.symbols)
         elif src == "news":

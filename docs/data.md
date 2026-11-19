@@ -76,6 +76,7 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 | `news` (symbol=ALL) | 미국 주식·코인 뉴스 (Benzinga): `id`, `ts`(기사 작성 시각), `updated_at`, `symbols`(쉼표로 이은 티커, 코인은 `BTCUSD`), `headline`, `summary`, `source`, `url`. 본문 없음 | Alpaca News API 무료 플랜 (키 필요) | 2015-01~ | 매일 |
 | `naver_trend` (symbol=ALL) | **네이버 검색어 트렌드** (일별 검색량 상대값): `ts`(날짜 KST 0시 → UTC), `keyword`, `symbol`(종목코드, 추가 검색어는 ""), `ratio`, **`win_start`·`win_end`(요청 창)**, `group`(같은 요청 키워드 5개, `\|`로 연결), `collected_at`. 키 = (ts, keyword, win_start, win_end). **창이 다르면 값이 상수배 다르다** → 아래 '네이버' 절의 시점 규칙대로 쓴다 | NAVER API HUB 데이터랩 (키 필요) | kr_daily 유니버스 보통주 중 2016년 이후 상장 중이던 종목명(약 2,900개) + `naver.trend.extra_keywords`, 2016-01~ | 매일 (어제까지 창 1개 갱신, 백필은 하루 2천 요청씩 약 7일) |
 | `naver_news_live` (symbol=ALL) | **네이버 뉴스 검색 앞으로 수집**: `ts`(발행 시각, 분 단위 → UTC), `title`·`summary`(태그 제거), `link`, `originallink`, `domain`(언론사 대신 원문 주소 호스트), `query`, `query_kind`(theme·stock), `symbol`, `collected_at`. 키 = (link, query) — 한 기사가 여러 질의에 걸리면 질의마다 1행. 본문 없음. **저작권 대상: data/ 밖으로 내보내지 않는다** | NAVER API HUB 뉴스 검색 (같은 키) | 2026-11-18~ (과거분 없음, 기간 지정 불가) | 하루 2~3회 (07:30·17:00·로그인) |
+| `naver_news_backfill` (symbol=ALL) | **네이버 뉴스 과거 백필** ("{종목명} 특징주", 전 쪽): 열은 `naver_news_live`와 같다. `query_kind`='backfill', `symbol` = 그 이름을 쓴 종목코드(같은 이름을 여러 종목이 썼으면 `\|`로 여럿). 질의별 총건수·잘림은 `naver.backfill_queries()`. 본문 없음, **data/ 밖으로 내보내지 않는다** | NAVER API HUB 뉴스 검색 (같은 키) | krx_1d 종목명 약 5,300개(2010~ 그날 이름, 상장폐지·우선주·옛 이름 포함). 기사는 질의에 따라 2001~ | 한 번 (하루 8천 호출씩 약 3일), `naver-news` 실행 안에서 live 다음 |
 | `ecos` | 기준금리, 국고채 3·10년, 회사채 AA- 3년, CD 91일, 원/달러 | 한국은행 ECOS | 2005~ | 매일 |
 | `legacy/*.parquet` | 기존 stock-analysis-site DB에서 가져온 것: 일봉(KR 3,259·US 5,487종목, 2016-08~ +시가총액), 실제 지수 구성종목, 재무제표(K-IFRS 349사·US GAAP 511사, 2021~), 공시(SEC 1995~, DART 2024-08~), 내부자 거래(SEC Form 4 2000~) | Docker Postgres (1회 가져오기) | 표 참고 | 수동 (`collect legacy`) |
 | `scan_hits` (symbol=ALL) | 장 전 스캐너가 규칙에 맞았다고 표시한 종목 (시장·셋업·종가·20일 평균 거래대금) | 위 데이터에서 계산 | 2026-11-15~ (셋업 함수로 과거 재계산 가능) | 매일 08:00 |
@@ -189,7 +190,7 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 - **뉴스 범위**: Benzinga 한 곳이고 영문뿐이다. 국내 종목 뉴스는 없다. `symbols`는 Benzinga 태깅이라 빠지거나 넓게 붙은 경우가 있다.
 - 데이터 스냅샷(lab 재현용)은 백테스트 엔진을 만들 때 함께 구현한다.
 
-## 네이버 (NAVER API HUB) — `naver_trend`, `naver_news_live`
+## 네이버 (NAVER API HUB) — `naver_trend`, `naver_news_live`, `naver_news_backfill`
 
 - 수집기: `src/autotrader/data/collectors/naver.py`. 키: `.env`의 `NAVER_CLIENT_ID`·`NAVER_CLIENT_SECRET` (네이버 클라우드 API Gateway 헤더 `X-NCP-APIGW-API-KEY-ID`·`X-NCP-APIGW-API-KEY`). 없으면 건너뛴다.
 - **정기 수집 등록**: `scripts/collect_all.ps1`의 기본 소스 목록에 `naver-trend`, `naver-news`가 들어 있다. 작업 스케줄러 `autotrader-collect`(07:30·17:00·로그인)가 메인 폴더에서 이 스크립트를 부르므로 master에 병합되면 따로 등록할 것이 없다. 하나만 돌릴 때:
@@ -198,7 +199,8 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   uv run python -m autotrader.data.cli collect naver-trend
   ```
 - **호출 한도** (`config/data.yaml`의 `naver`): 실제 HTTP 요청(재시도 포함)마다 `data/state.sqlite`의 `api_calls` 표에 KST 날짜별로 센다. 하루·월 한도에 닿으면 받은 데까지 저장하고 다음 실행에 이어받는다.
-  공식 한도: 트렌드 월 5만 건, 뉴스 검색은 문서마다 하루 2.5만 / 월 77.5만(작은 쪽 기준), 키당 50회/초.
+  공식 한도: 트렌드 월 5만 건. 뉴스 검색은 API HUB 문서(`api.ncloud-docs.com/docs/naver-api-hub-search-news`, 2026-09-17판)에 **"검색 API의 하루 호출 한도 25,000회"**(뉴스·블로그 등 검색 API 합산, 넘으면 429 "하루 허용량 초과"). 월 77.5만은 가이드 FAQ 값(= 2.5만 × 31, 2026-11-19 FAQ 페이지는 403으로 다시 확인 못 함). 키당 50회/초. 응답 헤더에 남은 한도 표시는 없다.
+  **검색 API 하루 몫** (`naver.news`·`naver.news_backfill`): live 상한 3,000 + 백필 상한 8,000 = 11,000 (공식의 44%). 백필은 장부를 `news_backfill`로 따로 세고, 오늘 live+백필 합계가 `search_day_ceiling`(20,000 = 25,000 − live 3,000 − 여유 2,000)에 닿아도 멈춘다. live가 상한까지 써도 공식 한도에 닿지 않으므로 live가 굶지 않는다.
 - **수집 기록과 빠진 날 점검**: 실행마다 `data/state.sqlite`의 `naver_runs` 표에 1행을 남긴다 — `dataset`, `started_at`·`finished_at`(UTC), `kst_date`, `status`(ok = 끝까지 / limit = 한도에 닿아 일부만, 다음 실행에 이어받음 / partial = 일부 질의가 실패, `error`에 '질의: 오류' / error = 오류로 멈춤 / skip = 키 없음), `rows`(새로 저장한 행 수, 뉴스는 이미 있던 기사 제외), `calls`(그 실행의 호출 수), `error`.
   ```powershell
   uv run python -m autotrader.data.cli naver-gaps                         # 뉴스: 첫 수집일~오늘 중 문제 있는 날
@@ -206,6 +208,7 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
   ```
   `problem`: `missing`(그날 실행 기록 없음), `failed`(실행했지만 ok·limit·partial 없음), `partial`(일부 질의만 성공한 실행뿐), `empty`(성공했지만 새 행 0 — 뉴스는 거래일이면 의심). `trading_day`는 krx_1d로 판단(주말 False, krx_1d가 아직 없는 날은 빈 값). 거래일(또는 아직 모르는 평일)에 문제가 있으면 종료 코드 1. 코드에서는 `naver.gaps()`, `naver.runs()`.
   **앞으로 검증의 시작일** = `naver.runs("naver_news_live")`에서 status가 ok이고 rows > 0인 첫 `kst_date` 이후 첫 거래일. 2026-11-18·19 정기 실행은 아래 start 상한 문제로 모두 error였다(2026-11-19 수정). 그 뒤 `missing`·`failed`·`partial`인 거래일은 그날 장중 기사가 비어 있을 수 있다(질의당 최신 1,099건까지는 다음 실행이 메우므로 `누락 가능` 로그가 없으면 대개 채워진다).
+- **뉴스 과거 백필 정기 수집**: 별도 소스가 아니라 **`naver-news`의 모드**다. `collect naver-news`가 live 수집을 먼저 끝낸 뒤 `naver.news_backfill.enabled`면 같은 실행에서 백필을 이어 한다 (`collect_all.ps1`은 소스를 병렬로 돌리므로, 따로 두면 live와 순서가 보장되지 않아서). live가 오류로 멈추면 백필은 하지 않는다. 수집 기록은 `naver_runs`에 `dataset=naver_news_backfill`로 따로 남는다 (`naver-gaps --dataset naver_news_backfill`). 끝나면(모든 질의 done) 실행은 호출 0회로 바로 끝난다. 끄려면 `enabled: false`. 수동으로 백필만: `uv run python -m autotrader.data.cli collect naver-news-backfill`.
 - **과금 멈춤**: NAVER API HUB는 "한시적 무료, 유료 전환 시 사전 공지"다. 401·402·403, 본문에 유료·과금·결제 등의 말이 있는 오류, 429 반복이면 `NaverStop`으로 즉시 멈추고 상태에 오류를 남기며 텔레그램(`logs/alerts.log`)으로 알린다. 이때는 개발·점검 HQ가 사용자에게 보고한다 (비용은 사용자 승인).
 
 ### 검색어 트렌드 시점 규칙 (lab이 지킬 것)
@@ -222,7 +225,35 @@ store.query(f"SELECT ... FROM '{store.DATA_DIR.as_posix()}/binance_um_funding/*/
 - 최신순으로 100건씩 넘기다 지난번 마지막 기사 시각보다 오래된 기사가 나오면 멈춘다. API HUB 문서(`api.ncloud-docs.com/docs/naver-api-hub-search-news`)의 범위는 **start 1~1000, display 1~100** (넘으면 400 `SE03`·`SE02`)이라 쪽 시작 위치는 1, 101, …, 901, **1000**(1건 겹침) → 질의당 최신 1,099건까지. 그 안에서 못 따라잡으면 로그에 `누락 가능`이 남는다 (샘플: `특징주` 9시간에 100건, `테마주` 1주에 100건 → 하루 2회면 충분).
   2026-11-19 첫 정기 실행은 11쪽째를 start=1001로 불러 400으로 실행 전체가 죽었다 → 상한을 지키게 고치고, 한 질의가 실패해도(400 등) 그 질의만 건너뛰게 했다. 실패한 질의는 받은 쪽까지 저장하되 마지막 기사 시각을 올리지 않아 다음 실행이 처음부터 다시 받고, 실행 기록은 `partial`. 질의가 모두 실패하면 error로 멈추고 알린다. 과금·인증(`NaverStop`)·호출 한도는 질의가 아니라 실행 전체를 멈춘다.
 - 시점: `ts`는 네이버가 준 발행 시각(분 단위)이다. 기사는 **`ts` 다음 분봉부터**, 일봉 전략은 장 마감(15:30 KST) 뒤 기사면 다음 거래일부터 쓴다. 제목·요약은 받을 때의 값이다 (`collected_at`).
-- 과거분은 없다 — 2026-11-18부터 쌓인다. 과거 검증(2012~)에는 빅카인즈 쪽을 쓴다.
+- 과거분은 없다 — 2026-11-18부터 쌓인다. 과거 검증(2012~)에는 빅카인즈 쪽 또는 아래 `naver_news_backfill`을 쓴다.
+
+### 뉴스 과거 백필 규칙 (`naver_news_backfill`, 2026-11-19, 전략부 L004 요청)
+- 배경: 일반 질의는 최신 1,099건까지만 받지만, **"{종목명} 특징주"**로 좁히면 종목별 총건수가 대개 1,099 아래라 전 기간을 받는다.
+- 질의: `naver.news_backfill.templates`(기본 `"{name} 특징주"`, 2차로 `"{name} 관련주"` 추가 가능 — 호출 약 2배) × 종목명.
+  - **종목명 = krx_1d에 그날 찍힌 이름**(KRX Open API의 그날 종목명 = 그 시절 이름). 이름이 바뀐 종목은 이름마다 질의(예: 000040 S&T모터스 → KR모터스). 2026-11-19 기준 종목코드 3,707개, 이름 5,299개, 이름이 바뀐 종목 1,120개.
+  - 한계: krx_1d가 2010~라 **2010년 전에 바뀐 옛 이름은 없다**. 같은 이름을 다른 시기에 다른 종목이 쓰면 질의 하나로 받고 `symbol`에 코드를 모두 적는다 — 어느 종목 기사인지는 `backfill_queries()`의 이름 사용 기간(`name_first`~`name_last`)과 기사 날짜로 lab이 가른다. 흔한 단어 이름(서남·덕성 등)은 오탐이 섞인다.
+- 질의마다 최신순(`sort=date`)으로 모든 쪽(start 1, 101, …, 901, 1000; display 100)을 받는다. 질의 장부 `naver.backfill_queries()`(state.sqlite `naver_backfill_query`): `total`(네이버 전체 건수), `got`, `pages`, **`truncated`=1이면 total > 1,099라 오래된 기사가 잘림**(대형주, 예: 삼성전자 특징주 48,370건 → 2026-08 이후만), `status`(done·error), `attempts`.
+- 이어받기: done 질의는 건너뛴다. 400 등으로 실패한 질의는 `max_attempts`(3)번까지 다음 실행에 다시. 한도에 닿으면 끝난 질의까지 저장하고 멈춘다(진행 중이던 질의는 다음에 처음부터).
+- 규모: 무작위 이름 20개 표본의 총건수 중앙값 약 230건, 평균 3.8쪽, 잘림 5% → **약 2만 호출**. 하루 8,000이면 **약 3일**.
+- 2026-11-19 실호출 확인(임시 경로, 29회): 모나리자 856건 2001-02-09~, 오리엔트정공 490건 2009-08-28~, 상지건설 318건 2011-02-24~ — 전략부 L004 확인값과 같다. 삼성전자 특징주는 truncated.
+
+### 뉴스 `pubDate`(= `ts`) 검증 — 오래된 기사 (2026-11-19)
+- API 문서: `pubDate`는 "뉴스 기사가 네이버에 제공된 시간 — 네이버에 제공되지 않은 기사는 기사 원문이 제공된 시간".
+- 대조 1 — 네이버 기사 페이지의 입력 시각(`data-date-time`) 8건 (2001~2015): **8건 모두 분까지 일치**, 초는 버려진다(예: 2013-02-13 09:16:29 → `ts` 09:16).
+  | `ts`(KST) | 네이버 입력 시각 |
+  |---|---|
+  | 2001-02-09 14:14 | 2001-02-09 14:14:00 |
+  | 2011-11-02 09:18 | 2011-11-02 09:18:06 |
+  | 2012-11-21 15:33 | 2012-11-21 15:33:02 |
+  | 2013-02-13 09:16 | 2013-02-13 09:16:29 |
+  | 2013-12-23 09:44 | 2013-12-23 09:44:38 |
+  | 2014-05-19 08:18 | 2014-05-19 08:18:03 |
+  | 2014-09-05 10:28 | 2014-09-05 10:28:02 |
+  | 2015-11-12 09:54 | 2015-11-12 09:54:39 |
+- 대조 2 — 원문 주소에 박힌 언론사 송고 시각 3건: 머니투데이 2013-02-13 09:16:38(`ts` 09:16), 2015-04-15 09:10:38(`ts` 09:11) → 1분 안. 아시아경제 2013-12-23 09:28:55 → `ts` 09:44 (**네이버 제공이 16분 늦음**).
+- 2016년 전 기사 383건의 시각 분포: 9~10시에 몰리고(장 시작 직후 특징주), 정각(00분) 비율 1.6% → 날짜만 있고 시각을 채운 값이 아니다.
+- 결론: 오래된 기사도 `ts`는 **분 단위 실제 시각**이며 원문 송고 시각과 **같거나 늦다**(늦은 쪽이라 미래참조 위험은 없다, 보수적). 표본이 작으므로(11건) lab은 아래 규칙을 지킨다.
+- **시점 규칙 제안**: 기사는 **`ts` + 1분부터** 안다고 본다(초를 버리므로). 분봉 전략은 그다음 분봉부터, 일봉 전략은 `ts`가 D일 15:20 KST 전이면 D일 종가, 그 뒤(장 마감 동시호가·장 후)면 **D+1 거래일 시가부터**. 날짜만 쓰는 경우 가장 보수적인 규칙은 "D일 기사 → D+1 거래일 시가부터". 특징주 기사는 가격이 움직인 **뒤에** 쓰이므로 사전 신호가 아니라 라벨(그날 왜 움직였나)로 쓴다.
 
 ## 상태 점검과 알림
 
