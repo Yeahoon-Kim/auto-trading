@@ -22,7 +22,7 @@ import httpx
 import pandas as pd
 
 from .. import store
-from .common import RateLimiter, config, get_json, logger
+from .common import RateLimiter, Redirected, config, get_json, logger
 
 KST = "Asia/Seoul"
 KRX_API = "https://data-dbg.krx.co.kr/svc/apis/sto"
@@ -176,11 +176,23 @@ def _num(s: pd.Series) -> pd.Series:
 
 
 def _dart_fin(codes: list[str], year: int, reprt: str) -> pd.DataFrame:
-    """100개사 묶음 × 한 보고서 → 회사당 1행 (연결 우선, 없으면 별도). 손익은 3개월 값 + _cum(누적)."""
+    """100개사 묶음 × 한 보고서 → 회사당 1행 (연결 우선, 없으면 별도). 손익은 3개월 값 + _cum(누적).
+
+    DART는 일부 corp_code 묶음에 302 → error1.html을 준다 (2026-11-19 확인: 같은 100개사도 순서만 바꾸면 200,
+    99개·50개로 나누면 200, 다른 연도·보고서에서도 같은 묶음은 302 → 한도·정책이 아니라 요청 문자열을 거르는 듯).
+    그러면 묶음을 반으로 나눠 다시 묻는다. 1개사 요청도 302면 묶음 문제가 아니라 DART 점검·차단으로 보고 멈춘다."""
     _dart_limit.wait()
-    j = get_json(_http, "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json",
-                 {"crtfc_key": os.environ["DART_API_KEY"], "corp_code": ",".join(codes),
-                  "bsns_year": str(year), "reprt_code": reprt})
+    try:
+        j = get_json(_http, "https://opendart.fss.or.kr/api/fnlttMultiAcnt.json",
+                     {"crtfc_key": os.environ["DART_API_KEY"], "corp_code": ",".join(codes),
+                      "bsns_year": str(year), "reprt_code": reprt})
+    except Redirected as e:
+        if len(codes) == 1:
+            raise RuntimeError(f"DART fin 1개사 요청도 리다이렉트 ({codes[0]} {year} {reprt}) → 점검·차단 의심: {e}") from None
+        h = len(codes) // 2
+        logger.info(f"dart_fin {year} {reprt} {len(codes)}개사 묶음 HTTP {e.status} → {h}+{len(codes) - h}개로 나눠 다시")
+        parts = [p for p in (_dart_fin(codes[:h], year, reprt), _dart_fin(codes[h:], year, reprt)) if not p.empty]
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if j.get("status") == "013":
         return pd.DataFrame()
     if j.get("status") != "000":
