@@ -104,6 +104,39 @@ def test_ttm_nan_when_consolidation_basis_changes(tmp_store):
     assert _load().equity[SYM].loc["2024-05-16"] == 1000.0 + 20240   # 재무상태는 그대로 최신 분기
 
 
+def test_q4_nan_when_fy_and_q3_basis_differ(tmp_store):
+    """4분기 = FY − Q3 누적은 두 보고서의 fs_div가 같을 때만. 2023 Q3만 별도(OFS), FY는 연결(CFS)이면 2023 4분기 손익은
+    NaN이고, 그 4분기를 포함하되 2023 Q3은 포함하지 않는 TTM(2024 Q3 기준: 23Q4~24Q3)도 NaN이어야 한다
+    (예전에는 연결 연간 − 별도 누적이 섞인 값이 TTM에 들어갔다, validator 보고 약 280행)."""
+    _write_px()
+    rows = _all_rows()
+    rows[2] = _row(2023, "Q3", fs_div="OFS")
+    _write_fin(rows)
+    rep = bdata.fin_reports()
+    q4 = rep[(rep["period"] == "FY") & (rep["qidx"] == 2023 * 4 + 3)].iloc[0]
+    assert np.isnan(q4["revenue"]) and np.isnan(q4["net_income"])
+    assert q4["total_equity"] == 1000.0 + 20230 + 3                # 재무상태는 그대로
+    q4_24 = rep[(rep["period"] == "FY") & (rep["qidx"] == 2024 * 4 + 3)].iloc[0]
+    assert q4_24["revenue"] == 41.0                                # 같은 기준인 해는 그대로
+    ttm = _load().revenue_ttm[SYM]
+    assert np.isnan(ttm.loc["2024-11-15"])                         # 23Q4(혼재)~24Q3
+    assert ttm.loc["2025-03-17"] == 104.0                          # 24Q1~24Q4는 모두 연결
+
+
+def test_company_report_q4_same_rule(tmp_store):
+    """intel/company.py 기업 리포트의 4분기(FY−Q3 누적)도 같은 규칙: 기준이 다르면 손익 없음."""
+    from autotrader.intel import company
+    rows = _all_rows()
+    rows[2] = _row(2023, "Q3", fs_div="OFS")
+    for r in rows:  # 리포트는 영업이익 열도 쓴다
+        r["operating_income"], r["operating_income_cum"] = r["revenue"] / 2, r["revenue_cum"] / 2
+    _write_fin(rows)
+    f = company._fund_dart(SYM, pd.Timestamp("2025-06-30")).set_index("period_label")
+    assert np.isnan(f.loc["2023Q4*", "revenue"]) and "다름" in f.loc["2023Q4*", "flag"]
+    assert f.loc["2023Q4*", "total_equity"] == 1000.0 + 20230 + 3
+    assert f.loc["2024Q4*", "revenue"] == 41.0 and f.loc["2024Q4*", "flag"] == "FY−Q3누적"
+
+
 def test_missing_quarter_keeps_last_complete_ttm(tmp_store):
     _write_px()
     _write_fin([r for r in _all_rows() if not (r["bsns_year"] == 2024 and r["period"] == "Q1")])
