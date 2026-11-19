@@ -50,6 +50,28 @@ def _rf(panel: Panel, index: pd.DatetimeIndex) -> pd.Series | None:
         return None
 
 
+def judge_sharpe(r: pd.Series, panel: Panel) -> dict:
+    """판정 기준 1·2·3과 보고서의 공용 Sharpe (2026-11-19부터 한 정의).
+
+    sharpe     = (수익 − 그 구간 날짜의 무위험수익률) 초과수익의 연율 Sharpe (benchmark.metrics와 같은 식).
+                 rf: KR은 CD 91일, 그 밖은 연방기금금리 (전날 관측값). 일봉이 아니거나 rf 데이터가 없으면 rf=0.
+    sharpe_rf0 = rf를 빼지 않은 값 (참고·예전 결과와 비교용)."""
+    r = r.dropna()
+    rf = _rf(panel, r.index)
+    ex = r - rf.reindex(r.index).fillna(0) if rf is not None else r
+    year = panel.bars_per_year
+    return {"sharpe": engine.sharpe(ex, year), "sharpe_rf0": engine.sharpe(r, year)}
+
+
+def _rf_note(panel: Panel) -> str:
+    """summary·보고서에 적을 Sharpe 정의 한 줄."""
+    if not panel.timeframe.endswith("d"):
+        return "rf=0 (일봉이 아니어서 무위험수익률을 빼지 않음)"
+    src = "CD 91일(ECOS)" if panel.market == "kr_stock" else "연방기금금리(FRED DFF)"
+    return (f"rf 차감 ({src}, 전날 관측값)" if _rf(panel, panel.index[-2:]) is not None
+            else f"rf=0 (**{src} 데이터를 읽지 못함**)")
+
+
 def _committed(lab_dir: Path) -> bool | None:
     """가설(lab.yaml·README.md)이 커밋돼 있고 수정되지 않은 상태인지."""
     try:
@@ -71,7 +93,7 @@ def _regimes(panel: Panel, r: pd.Series, year: float) -> dict:
         lab = g.set_index(g["ts"].dt.tz_localize(None).dt.normalize())[REGIME_COL[panel.market]].shift(1)
         lab = lab[~lab.index.duplicated(keep="last")].reindex(r.index.normalize(), method="ffill")
         lab.index = r.index
-        return {str(k): {"bars": len(v), "sharpe": engine.sharpe(v, year),
+        return {str(k): {"bars": len(v), **judge_sharpe(v, panel),
                          "total_return": float((1 + v).prod() - 1)}
                 for k, v in r.groupby(lab) if len(v) > 1}
     except Exception as e:
@@ -91,7 +113,7 @@ def _bench(cfg: dict, panel: Panel, idx: pd.DatetimeIndex, costs: engine.Costs) 
         name = f"{b} 매수 후 보유 (비용 포함)"
     else:
         return {"name": b, "error": "벤치마크를 찾을 수 없음 (SPY_* 변형 또는 panel 안의 종목)"}
-    return {"name": name, "sharpe": engine.sharpe(r, panel.bars_per_year),
+    return {"name": name, **judge_sharpe(r, panel),
             "total_return": float((1 + r).prod() - 1), "mdd": float(((1 + r).cumprod() / (1 + r).cumprod().cummax() - 1).min())}
 
 
@@ -167,6 +189,23 @@ class _Runner:
             trade.save_log(res, out, name)
 
 
+def _all_passed(c: dict) -> bool:
+    """신호 cut 검사 통과 + 필드 재구성 검사 중 실패(False)가 없음.
+    재구성하지 못한 필드(passed None)는 실패가 아니라 '미확인' — 보고서에 따로 적는다."""
+    return bool(c["passed"]) and all((c.get(k) or {}).get("passed") is not False
+                                     for k in ("dividend_fields", "fin_fields", "mcap_fields"))
+
+
+def _weight_cap(res: engine.Result) -> dict | None:
+    """보유 비중 합 (거래정지 잔량 처리 결과 확인용)."""
+    w = getattr(res, "weights", None)
+    if w is None or w.empty:
+        return None
+    tot = w.sum(axis=1)
+    return {"frozen_capped_bars": res.meta.get("frozen_capped_bars", 0),
+            "sum_max": float(tot.max()), "sum_mean": float(tot.mean())}
+
+
 def holds_up(test_sharpe: float, train_sharpe: float) -> bool:
     """고정 기준 2: 시험 Sharpe ≥ 학습 Sharpe × 0.5. 학습 Sharpe가 0 이하면 탈락
     (그대로 두면 기준선이 음수가 돼 손실 전략도 통과한다)."""
@@ -190,20 +229,23 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
     causal["dividend_fields"] = check_dividend_causality(panel)   # 배당 필드 자체의 시점 (필드가 없으면 통과)
     causal["fin_fields"] = check_fin_causality(panel)             # 재무 필드 자체의 시점 (필드가 없으면 통과)
     causal["mcap_fields"] = check_mcap_causality(panel)           # US 시가총액 필드 자체의 시점 (필드가 없으면 통과)
-    causal["passed"] = (causal["passed"] and causal["dividend_fields"]["passed"] and causal["fin_fields"]["passed"]
-                        and causal["mcap_fields"]["passed"])
+    causal["passed"] = _all_passed(causal)
     base = wfrun(params)
     test = base["test"]
     rf = _rf(panel, test.returns.index)
     tm = test.metrics(year, rf)
+    # 기준 1·2·3은 모두 judge_sharpe 한 정의 (rf 차감). tm["sharpe"]와 같은 값이다 (같은 식·같은 rf)
+    s1 = judge_sharpe(test.returns, panel)
     win_rows = []
     for w in base["windows"]:
         tr = w.pop("_train_result")
         te = w.pop("_test_returns")
-        win_rows.append({**w, "train_sharpe": engine.sharpe(tr.returns, year),
-                         "test_sharpe": engine.sharpe(te, year),
+        a, b = judge_sharpe(tr.returns, panel), judge_sharpe(te, panel)
+        win_rows.append({**w, "train_sharpe": a["sharpe"], "test_sharpe": b["sharpe"],
+                         "train_sharpe_rf0": a["sharpe_rf0"], "test_sharpe_rf0": b["sharpe_rf0"],
                          "test_return": float((1 + te).prod() - 1)})
     train_sharpe = float(np.mean([w["train_sharpe"] for w in win_rows]))
+    train_sharpe_rf0 = float(np.mean([w["train_sharpe_rf0"] for w in win_rows]))
     t0, t1 = test.returns.index[0], test.returns.index[-1] + pd.Timedelta(days=1)
     no_cost = R.rerun(base, costs.scaled(0), t0, t1)
     cost2 = R.rerun(base, costs.scaled(2), t0, t1)
@@ -215,17 +257,21 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
             for k in numeric:   # 하나씩 바꾼다 (모두 같이 바꾸면 서로 상쇄될 수 있음)
                 p = dict(params)
                 p[k] = engine.perturb({k: params[k]}, f)[k]
-                s = engine.sharpe(wfrun(p)["test"].returns, year)
-                sens.append({"param": k, "factor": f, "value": p[k], "test_sharpe": s})
+                s = judge_sharpe(wfrun(p)["test"].returns, panel)
+                sens.append({"param": k, "factor": f, "value": p[k], "test_sharpe": s["sharpe"],
+                             "test_sharpe_rf0": s["sharpe_rf0"]})
 
     checks = [
-        {"no": 1, "rule": "시험 구간 Sharpe ≥ 1.0 (비용 포함)", "value": tm["sharpe"], "pass": tm["sharpe"] >= 1.0},
+        {"no": 1, "rule": "시험 구간 Sharpe ≥ 1.0 (비용 포함)", "value": s1["sharpe"],
+         "value_rf0": s1["sharpe_rf0"], "pass": s1["sharpe"] >= 1.0},
         # 학습 Sharpe가 0 이하면 "학습의 50%"가 음수가 돼 무엇이든 통과한다 → 학습에서 수익이 없으면 탈락
         {"no": 2, "rule": "시험 Sharpe ≥ 학습 Sharpe × 0.5 (학습 Sharpe > 0일 때만)",
-         "value": f"{tm['sharpe']:.2f} vs {train_sharpe:.2f}" + (" (학습 Sharpe ≤ 0)" if train_sharpe <= 0 else ""),
-         "pass": holds_up(tm["sharpe"], train_sharpe)},
+         "value": f"{s1['sharpe']:.2f} vs {train_sharpe:.2f}" + (" (학습 Sharpe ≤ 0)" if train_sharpe <= 0 else ""),
+         "value_rf0": f"{s1['sharpe_rf0']:.2f} vs {train_sharpe_rf0:.2f}",
+         "pass": holds_up(s1["sharpe"], train_sharpe)},
         {"no": 3, "rule": "파라미터 ±20%에서 Sharpe ≥ 0.5",
          "value": min((s["test_sharpe"] for s in sens), default=None),
+         "value_rf0": min((s["test_sharpe_rf0"] for s in sens), default=None),
          "pass": (min(s["test_sharpe"] for s in sens) >= 0.5) if sens else None},
         {"no": 4, "rule": "비용 2배에서도 수익", "value": cost2.metrics(year)["total_return"],
          "pass": cost2.metrics(year)["total_return"] > 0},
@@ -236,14 +282,20 @@ def develop(lab_dir: Path, quick: bool = False) -> dict:
     ]
     if not causal["passed"]:
         checks[6]["pass"] = False
+    for c in checks:        # numpy bool은 summary.json에 문자열 "False"로 적힌다 → 파이썬 bool로
+        if c["pass"] is not None:
+            c["pass"] = bool(c["pass"])
     summary = {
         "lab": lab_dir.name, "version": cfg.get("version"), "run_at": datetime.now().isoformat(timespec="seconds"),
         "market": cfg["market"], "timeframe": panel.timeframe, "fill": fill, "params": params,
         "data": panel.meta, "costs": engine.asdict(costs),
         "hypothesis_committed": _committed(lab_dir),
         "execution": ex, "money": _clean(test.money()),
-        "test": _clean(tm), "train_sharpe_mean": train_sharpe,
-        "test_no_cost": _clean(no_cost.metrics(year)), "test_cost_x2": _clean(cost2.metrics(year)),
+        # Sharpe 키: 어디서나 sharpe = rf 차감(판정 정의), sharpe_rf0 = 참고 (2026-11-19 통일)
+        "sharpe_definition": _rf_note(panel),
+        "test": _clean(tm), "train_sharpe_mean": train_sharpe, "train_sharpe_mean_rf0": train_sharpe_rf0,
+        "test_no_cost": _clean(no_cost.metrics(year, rf)), "test_cost_x2": _clean(cost2.metrics(year, rf)),
+        "weight_cap": _weight_cap(test),
         "windows": win_rows, "sensitivity": sens, "causality": causal,
         "benchmark": _bench(cfg, panel, test.returns.index, costs),
         "regimes": _regimes(panel, test.returns, year) if panel.timeframe.endswith("d") else None,
@@ -279,9 +331,9 @@ def open_lockbox(lab_dir: Path) -> dict:
     res = R.once(p, cut)
     m = res.metrics(year, _rf(panel, res.returns.index))
     dev_mdd = dev["test"]["mdd"]
-    ok = m["total_return"] >= 0 and abs(m["mdd"]) <= 1.5 * abs(dev_mdd)
+    ok = bool(m["total_return"] >= 0 and abs(m["mdd"]) <= 1.5 * abs(dev_mdd))
     summary = {"lab": lab_dir.name, "version": cfg.get("version"), "run_at": datetime.now().isoformat(timespec="seconds"),
-               "market": cfg["market"],
+               "market": cfg["market"], "sharpe_definition": _rf_note(panel),
                "lockbox": {"start": str(cut.date()), "end": panel.meta["end"]}, "params": p,
                "costs": engine.asdict(costs), "data": panel.meta, "test": _clean(m),
                "execution": ex, "money": _clean(res.money()),
@@ -390,12 +442,21 @@ def report(s: dict) -> str:
         lines.append(f"- 미래참조 자동 검사: {'통과' if c['passed'] else '**실패**'} "
                      f"(데이터를 {len(c['cuts'])}곳에서 잘라 다시 계산한 신호 비교"
                      + (f"; 배당 필드 {', '.join(df['fields'])} 재구성 비교 "
-                        f"{'통과' if df['passed'] else '**실패**'}" if df.get("fields") else "")
+                        f"{_pass_word(df['passed'])}" if df.get("fields") else "")
                      + (f"; 재무 필드 {', '.join(ff['fields'])} 재구성 비교 "
-                        f"{'통과' if ff['passed'] else '**실패**'}" if ff.get("fields") else "")
+                        f"{_pass_word(ff['passed'])}" if ff.get("fields") else "")
                      + (f"; 시가총액 필드 {', '.join(mf['fields'])} 재구성 비교 "
-                        f"{'통과' if mf['passed'] else '**실패**'}" if mf.get("fields") else "") + ")")
+                        f"{_pass_word(mf['passed'])}" if mf.get("fields") else "") + ")")
+        for k, d in (("배당", df), ("재무", ff), ("시가총액", mf)):
+            if d.get("fields") and d.get("passed") is None:
+                lines.append(f"- {k} 필드 재구성 비교 미확인: {d.get('reason', '재구성 원천 없음')}")
         lines.append(f"- 가설 커밋 상태: {s.get('hypothesis_committed')}")
+    if s.get("sharpe_definition"):
+        lines.append(f"- Sharpe 정의 (기준 1·2·3·보고서 공통): {s['sharpe_definition']}. 괄호 안 rf=0 값은 참고")
+    wc = s.get("weight_cap") or {}
+    if wc.get("frozen_capped_bars"):
+        lines.append(f"- 거래정지 잔량: 팔 수 없는 보유가 남은 봉 {wc['frozen_capped_bars']:,}개에서 나머지 매수를 줄여 "
+                     f"비중 합을 1로 맞춤 (빚내서 사지 않음). 보유 비중 합 평균 {wc['sum_mean']:.3f}, 최대 {wc['sum_max']:.3f}")
     lines += ["", "## 결과 (비용 포함)",
               f"- 총수익 {_fmt(t.get('total_return'))}, CAGR {_fmt(t.get('cagr'))}, Sharpe {_fmt(t.get('sharpe'))} "
               f"(rf=0: {_fmt(t.get('sharpe_rf0'))}), MDD {_fmt(t.get('mdd'))}, 거래 {t.get('trades')}회, "
@@ -413,12 +474,13 @@ def report(s: dict) -> str:
                      f"투입 {mo['invested']:,.0f} → 평가 {mo['value']:,.0f} (투입 대비 {mo['return_on_invested']:+.2%}, "
                      f"XIRR {_fmt(mo.get('xirr'))}, 남은 현금 {mo['cash_end']:,.0f})")
     if "test_no_cost" in s:
-        lines.append(f"- 참고 — 비용 없음 Sharpe {_fmt(s['test_no_cost'].get('sharpe'))}, "
+        lines.append(f"- 참고 — 비용 없음 Sharpe {_fmt(s['test_no_cost'].get('sharpe'))} "
+                     f"(rf=0: {_fmt(s['test_no_cost'].get('sharpe_rf0'))}), "
                      f"비용 2배 총수익 {_fmt(s['test_cost_x2'].get('total_return'))}")
     if s.get("benchmark"):
         b = s["benchmark"]
         lines.append(f"- 벤치마크 {b['name']}: " + (b.get("error") or
-                     f"Sharpe {_fmt(b['sharpe'])}, 총수익 {_fmt(b['total_return'])}, MDD {_fmt(b['mdd'])}"))
+                     f"Sharpe {_fmt(b['sharpe'])} (rf=0: {_fmt(b.get('sharpe_rf0'))}), 총수익 {_fmt(b['total_return'])}, MDD {_fmt(b['mdd'])}"))
     if s.get("trade_stats"):
         ts, tp = s["trade_stats"], s.get("trade") or {}
         lines += ["", "## 신호형 거래 (데스크 재생: make_plan → 체결 → check_position)",
@@ -440,15 +502,18 @@ def report(s: dict) -> str:
     lines += ["", "## 고정 기준", "| # | 기준 | 값 | 통과 |", "|---|---|---|---|"]
     for c in s["checks"]:
         p = {True: "✅", False: "❌", None: "미확인"}[c["pass"]]
-        lines.append(f"| {c['no']} | {c['rule']} | {_fmt(c['value'])} | {p} |")
+        rf0 = f" (rf=0: {_fmt(c['value_rf0'])})" if c.get("value_rf0") is not None else ""
+        lines.append(f"| {c['no']} | {c['rule']} | {_fmt(c['value'])}{rf0} | {p} |")
     if s.get("windows"):
         lines += ["", "## 워크포워드 창", "| 학습 | 시험 | 학습 Sharpe | 시험 Sharpe | 시험 수익 |", "|---|---|---|---|---|"]
         for w in s["windows"]:
             lines.append(f"| {w['train'][0]}~{w['train'][1]} | {w['test'][0]}~{w['test'][1]} | "
-                         f"{w['train_sharpe']:.2f} | {w['test_sharpe']:.2f} | {w['test_return']:.2%} |")
+                         f"{w['train_sharpe']:.2f}{_rf0(w.get('train_sharpe_rf0'))} | "
+                         f"{w['test_sharpe']:.2f}{_rf0(w.get('test_sharpe_rf0'))} | {w['test_return']:.2%} |")
     if s.get("sensitivity"):
         lines += ["", "## 파라미터 민감도 (하나씩 ±20%)"]
-        lines += [f"- {x['param']}={x['value']} (×{x['factor']}): Sharpe {x['test_sharpe']:.2f}" for x in s["sensitivity"]]
+        lines += [f"- {x['param']}={x['value']} (×{x['factor']}): Sharpe {x['test_sharpe']:.2f}{_rf0(x.get('test_sharpe_rf0'))}"
+                  for x in s["sensitivity"]]
     if s.get("regimes") and "error" not in s["regimes"]:
         lines += ["", "## 국면별 (참고, 전날 추세 라벨)"]
         lines += [f"- {k}: {v['bars']}봉, Sharpe {v['sharpe']:.2f}, 수익 {v['total_return']:.2%}"
@@ -456,6 +521,14 @@ def report(s: dict) -> str:
     no_f = "" if s["data"].get("funding") else "선물 펀딩비, "
     lines += ["", f"반영 안 한 것: 공매도 대차 비용, {no_f}시장 충격, 양도소득세, 현금 이자."]
     return "\n".join(lines) + "\n"
+
+
+def _rf0(v) -> str:
+    return f" (rf=0: {v:.2f})" if v is not None else ""
+
+
+def _pass_word(p) -> str:
+    return {True: "통과", False: "**실패**", None: "미확인"}[p]
 
 
 def _funding_lines(d: dict) -> list[str]:
