@@ -1,7 +1,7 @@
 id: L013
 name: kr-ma-support
 version: 1
-status: backtesting
+status: rejected         # 2026-11-20 사용자 판정 (validator 의견 rejected)
 category: classic
 type: trade
 

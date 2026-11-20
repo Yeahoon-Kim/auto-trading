@@ -101,4 +101,5 @@ L013과 같음 — 무작위 종목 위약(`placebo.py`, 시드 20, 같은 날·
 
 ## 판정
 - validator 의견서: [validation.md](validation.md) — **기각 권고** (기준 1~4 크게 불통과, 위약과 구별 안 됨, 결과를 뒤집을 엔진·미래참조 문제 없음).
-- 결과: (사용자가 정한다)
+- **판정: rejected** (사용자 판정 2026-11-20, validator 의견 rejected — [validation.md](validation.md))
+- 이유: 기준 1~4 불통과(시험 Sharpe −0.20, 비용 2배 −52%), 무작위 종목 위약과 구별 안 됨(백분위 65%).
