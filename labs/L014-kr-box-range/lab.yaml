@@ -1,0 +1,66 @@
+id: L014
+name: kr-box-range
+version: 1
+status: rejected         # 2026-11-20 사용자 판정 (validator 의견 rejected)
+category: classic
+type: trade
+
+trade:                   # 세 lab(L013·L014·L015) 공통, 결과 보기 전에 정함
+  risk_per_trade_pct: 1.0
+  max_heat_pct: 10.0
+  max_position_pct: 10.0
+  max_sector_pct:
+  max_open_positions: 10
+  kelly: none
+
+market: kr_stock
+universe: ALL            # krx_1d 상장폐지 포함, 유동성 필터는 strategy.py에서 (그날 알 수 있는 값)
+timeframe: 1d
+data_start: "2010-01-01"
+fields: [high, low, volume, value, raw_close]
+fill: next_open
+
+execution:
+  capital:               # 비우면 settings 기본 1,000만 원
+
+data_snapshot: ""
+
+trials:
+  count: 1
+  exposed_from: [L003]   # L003 쌍바닥(사이 고점 돌파)·피보나치 반등을 같은 개발 구간에서 봤음. 박스는 L003 2차 대상(미시험)
+  log:
+    - "2026-11-19 v1: 첫 개발 구간 실행 — lab 엔진(민감도 포함) + placebo.py 시드 20, 사전등록 그대로"
+
+walk_forward:
+  start: "2011-01-01"
+  train: 36M             # 세 lab 같은 창
+  test: 6M
+
+lockbox:
+  start: ""
+  end: ""
+  opened: false
+
+costs:
+  fee_pct:
+  slippage_pct:
+  tax_pct_sell:
+
+params:
+  box_n: 60              # 박스 길이 (약 3개월)
+  quiet: 10              # 최근 10봉 안에 새 고점·저점 없음
+  max_width: 0.30        # 박스 폭 (상단/하단 − 1) 상한
+  zone: 0.03             # 저가가 하단 + 3% 안
+  stop_buf: 0.01
+  tgt_buf: 0.01          # 상단 1% 아래에서 익절
+  rr_min: 3.0
+  max_new: 5
+  min_value: 1000000000
+  min_price: 1000
+
+benchmark: ""
+
+retirement:
+  max_drawdown_pct:
+  max_losing_days:
+  custom: ""

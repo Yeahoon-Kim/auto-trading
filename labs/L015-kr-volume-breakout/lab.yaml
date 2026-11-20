@@ -1,0 +1,67 @@
+id: L015
+name: kr-volume-breakout
+version: 1
+status: rejected         # 2026-11-20 사용자 판정 (validator 의견 rejected)
+category: classic
+type: trade
+
+trade:                   # 세 lab(L013·L014·L015) 공통, 결과 보기 전에 정함
+  risk_per_trade_pct: 1.0
+  max_heat_pct: 10.0
+  max_position_pct: 10.0
+  max_sector_pct:
+  max_open_positions: 10
+  kelly: none
+
+market: kr_stock
+universe: ALL            # krx_1d 상장폐지 포함, 유동성 필터는 strategy.py에서 (그날 알 수 있는 값)
+timeframe: 1d
+data_start: "2010-01-01"
+fields: [high, low, volume, value, raw_close]
+fill: next_open
+
+execution:
+  capital:               # 비우면 settings 기본 1,000만 원
+
+data_snapshot: ""
+
+trials:
+  count: 1
+  exposed_from: [L003, L011]   # L011 52주 신고가 근접(전략부 HQ 지정 2026-11-19). L003이 200일선 상향 돌파·골든크로스·추세선 돌파·쌍바닥 돌파를 같은 개발 구간에서 봤음 (KR 200일선 돌파는 반대 방향)
+  log:
+    - "2026-11-19 v1: 첫 개발 구간 실행 — lab 엔진(민감도 포함) + placebo.py 시드 20, 사전등록 그대로"
+
+walk_forward:
+  start: "2011-01-01"
+  train: 36M             # 세 lab 같은 창
+  test: 6M
+
+lockbox:
+  start: ""
+  end: ""
+  opened: false
+
+costs:
+  fee_pct:
+  slippage_pct:
+  tax_pct_sell:
+
+params:
+  ma_periods: [5, 10, 20, 60, 120, 240]   # 다음 저항 후보 이평 (사용자 지정 KR)
+  brk_mas: [60, 120, 240]                 # 돌파 대상 이평 (단기 5·10·20일은 하루 걸러 넘나들어 돌파로 보지 않음)
+  brk_n: 60              # 전고점 = 직전 60봉 고가 최대
+  vol_mult: 2.0          # 거래량 ≥ 직전 20봉 평균 × 2
+  fail_buf: 0.02         # 돌파선 2% 아래로 되밀리면 실패 → 손절
+  tgt_buf: 0.005
+  res_n: 250             # 다음 저항 후보: 직전 250봉 고점 (그리고 위쪽 이평)
+  rr_min: 3.0
+  max_new: 5
+  min_value: 1000000000
+  min_price: 1000
+
+benchmark: ""
+
+retirement:
+  max_drawdown_pct:
+  max_losing_days:
+  custom: ""
