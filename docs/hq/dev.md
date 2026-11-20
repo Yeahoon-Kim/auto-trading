@@ -25,6 +25,10 @@
 
 ## 예약 작업 (Windows 작업 스케줄러)
 `autotrader-collect`(07:30·17:00·로그인), `autotrader-brief`(08:00), `autotrader-health`(12:00·20:00), `autotrader-ops`(23:00), `autotrader-weekly`(토 10:00). 등록 스크립트 `scripts/register_schedule.ps1`.
+- **2026-11-20 사용자 결정: 수집은 수동.** `autotrader-collect`·`brief`·`health`·`ops`를 비활성화(Disabled)했다. `autotrader-weekly`만 남김. 최신 데이터가 급하지 않아 월 1회 정도 수동 수집으로 충분하다는 판단.
+  - 수동 수집: 메인 폴더에서 `powershell -ExecutionPolicy Bypass -File scripts\collect_all.ps1` (일부만: `-Sources kr,us`). 브리핑·점검·보고도 필요할 때 수동 실행.
+  - 다시 켜기: `Enable-ScheduledTask -TaskName autotrader-collect` (나머지도 같은 방식).
+  - **대가 (사용자가 알고 결정)**: 최근분만 주는 소스는 수집 간격만큼 영영 빠진다 — `naver_news_live`(질의당 최신 약 1,100건) → **L004 앞으로 검증 사실상 중단**, `us_1m`·`binance_um_oi`(최근 30일). `kr_1m`(약 1년)은 월 1회면 괜찮다. DART 백필(연고표·사업 내용)·네이버 과거 백필은 수집할 때만 진행되어 완료가 늦어진다.
 
 ## 알아 둘 것
 - 데이터는 메인 폴더 `data/`에만 있다(git 제외). 작업 폴더에서는 `AUTOTRADER_DATA_DIR` 지정.
