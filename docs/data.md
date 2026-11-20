@@ -274,5 +274,6 @@ uv run python -m autotrader.intel.company 005930 --peers 000660 [--asof 2024-06-
   - legacy 재무: 추정 공개일부터
 
 - 작업 스케줄러: `autotrader-collect`(07:30, 17:00, 로그인), `autotrader-brief`(08:00), `autotrader-health`(12:00, 20:00)
+  - **2026-11-20부터 수동 수집** (사용자 결정): 위 세 작업과 `autotrader-ops`를 비활성화했다. 수동으로 `scripts\collect_all.ps1`를 실행한다. 최근분만 주는 소스(`naver_news_live`, `us_1m`, `binance_um_oi`)는 수집 간격만큼 빠진다.
 - 수집기 전체가 오류로 죽으면 즉시 텔레그램 알림. 강제 종료처럼 알릴 틈이 없는 경우는 health 점검이 데이터 신선도로 잡아낸다.
 - 텔레그램 토큰이 없으면 `logs/alerts.log`에만 남는다.
